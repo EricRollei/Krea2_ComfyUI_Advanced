@@ -1,0 +1,23 @@
+{
+  "_comment": "Krea2 conditioning-rebalance presets. Each entry: 'multiplier' (global gain) + 'weights' (12 per-tap gains for the Qwen3-VL layer taps). Extra keys (like 'note') are ignored by the loader, so it's safe to annotate and to add new fields later. Edit this file and restart ComfyUI to make new presets appear in the cond_preset dropdown.",
+  "enhancer_8-9-11": {
+    "multiplier": 4.0,
+    "weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.5, 5.0, 1.1, 4.0, 1.0],
+    "note": "Krea2T-Enhancer profile - boosts deep semantic taps 8/9/11. Matches your current manual default."
+  },
+  "flat": {
+    "multiplier": 1.0,
+    "weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    "note": "Neutral - no per-tap emphasis and unit gain. Useful A/B baseline."
+  },
+  "gentle": {
+    "multiplier": 2.0,
+    "weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 1.05, 1.8, 1.0],
+    "note": "Softer version of the enhancer profile for a subtle adherence bump."
+  },
+  "strong": {
+    "multiplier": 6.0,
+    "weights": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 3.0, 6.0, 1.2, 5.0, 1.0],
+    "note": "Aggressive adherence. Watch for oversaturation - this is the case a per-token delta-clamp governor would tame."
+  }
+}

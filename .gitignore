@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────
+#  Eric_Krea2 - .gitignore
+# ─────────────────────────────────────────────────────────────────────────
+
+# Local History extension snapshots (VS Code) - never publish these
+.history/
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Model weights & large binaries (should live on HF / releases, not in git)
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.onnx
+
+# Generated images / scratch outputs
+outputs/
+scratch/
+_tmp_*.py
+
+# User-local preset writes (keep the shipped example library tracked; ignore
+# personal overrides). Comment these out if you DO want to publish your presets.
+# ultra_presets.json
+# cond_presets.json

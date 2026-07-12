@@ -1,0 +1,25 @@
+# Eric_Krea2 - Python dependencies
+# =================================
+# NOTE: torch, numpy, Pillow, requests, aiohttp and safetensors already ship
+# with ComfyUI. They are intentionally NOT pinned here so this pack never
+# reinstalls a mismatched torch (which would break your CUDA build). Install
+# only what ComfyUI does not already provide.
+
+# --- Required: a diffusers build that includes Krea2Pipeline ---------------
+# Krea 2 support was merged AFTER the 0.39.0.dev0 tag, and the version string
+# was not bumped, so a normal `pip install diffusers` is NOT enough. Install
+# from source (the README shows the --force-reinstall form for the portable
+# build):
+#     pip install --upgrade --force-reinstall --no-deps \
+#         git+https://github.com/huggingface/diffusers.git
+diffusers @ git+https://github.com/huggingface/diffusers.git
+
+# --- Required: transformers new enough to provide Qwen3VLModel --------------
+transformers>=4.57.0
+
+# --- Provided by ComfyUI (listed for reference; do not force-reinstall) -----
+# torch
+# numpy
+# Pillow
+# requests
+# safetensors

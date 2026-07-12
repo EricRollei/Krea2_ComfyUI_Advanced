@@ -1,0 +1,71 @@
+{
+  "Candidate 1": {
+    "sigmas": {
+      "s1_enable": true,
+      "s1_curve": "beta57",
+      "s1_detail_bias": 0.72,
+      "s1_rho": 0,
+      "s1_alpha": 0.5,
+      "s1_beta": 0.7,
+      "s2_enable": true,
+      "s2_curve": "exponential",
+      "s2_detail_bias": 0.82,
+      "s2_rho": 0,
+      "s2_alpha": 0.5,
+      "s2_beta": 0.7,
+      "s3_enable": true,
+      "s3_curve": "beta",
+      "s3_detail_bias": -0.16,
+      "s3_rho": 0,
+      "s3_alpha": 0.6,
+      "s3_beta": 0.4,
+      "sigplot": null
+    }
+  },
+  "Claude-1": {
+    "sigmas": {
+      "s1_enable": true,
+      "s1_curve": "beta57",
+      "s1_detail_bias": 0,
+      "s1_rho": 0,
+      "s1_alpha": 0.5,
+      "s1_beta": 0.7,
+      "s2_enable": true,
+      "s2_curve": "karras",
+      "s2_detail_bias": 0.3,
+      "s2_rho": 0,
+      "s2_alpha": 0.5,
+      "s2_beta": 0.7,
+      "s3_enable": true,
+      "s3_curve": "karras",
+      "s3_detail_bias": 0.4,
+      "s3_rho": 0,
+      "s3_alpha": 0.5,
+      "s3_beta": 0.7,
+      "sigplot": null
+    }
+  },
+  "Claude-8mp": {
+    "sigmas": {
+      "s1_enable": true,
+      "s1_curve": "beta57",
+      "s1_detail_bias": 0,
+      "s1_rho": 0,
+      "s1_alpha": 0.5,
+      "s1_beta": 0.7,
+      "s2_enable": true,
+      "s2_curve": "karras",
+      "s2_detail_bias": 0.3,
+      "s2_rho": 0,
+      "s2_alpha": 0.5,
+      "s2_beta": 0.7,
+      "s3_enable": true,
+      "s3_curve": "karras",
+      "s3_detail_bias": 0.4,
+      "s3_rho": 0,
+      "s3_alpha": 0.5,
+      "s3_beta": 0.7,
+      "sigplot": null
+    }
+  }
+}
