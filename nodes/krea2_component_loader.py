@@ -641,10 +641,15 @@ class EricKrea2ComponentLoader:
                 "device": device, "keep_in_vram": keep_in_vram, "offload_vae": offload_vae,
             }
             n = _settings.apply_named_preset("loader", loader_preset, _vals, set(_vals.keys()))
-            base_pipeline_path = _vals["base_pipeline_path"]; transformer_path = _vals["transformer_path"]
-            text_encoder_path = _vals["text_encoder_path"]; vae_path = _vals["vae_path"]
-            precision = _vals["precision"]; attention_backend = _vals["attention_backend"]
-            device = _vals["device"]; keep_in_vram = _vals["keep_in_vram"]; offload_vae = _vals["offload_vae"]
+            base_pipeline_path = _vals["base_pipeline_path"]
+            transformer_path = _vals["transformer_path"]
+            text_encoder_path = _vals["text_encoder_path"]
+            vae_path = _vals["vae_path"]
+            precision = _vals["precision"]
+            attention_backend = _vals["attention_backend"]
+            device = _vals["device"]
+            keep_in_vram = _vals["keep_in_vram"]
+            offload_vae = _vals["offload_vae"]
             print(f"[EricKrea2-Comp] loader_preset '{loader_preset}': applied {n} field(s).")
 
         try:
