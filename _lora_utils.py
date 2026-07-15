@@ -906,6 +906,10 @@ _KREA_LEAF = {
 _KREA_STANDALONE = {
     "first": "img_in",
     "last_linear": "final_layer.linear",
+    # SimpleModulation table [2, dim] - a bare nn.Parameter on the diffusers side
+    # (final_layer.scale_shift_table), NOT a Linear: PEFT cannot wrap it, so the
+    # converter routes it through the direct-delta path (see the table branch).
+    "last_modulation_lin": "final_layer.scale_shift_table",
     "tmlp_0": "time_embed.linear_1",
     "tmlp_2": "time_embed.linear_2",
     "tproj_1": "time_mod_proj",
@@ -1020,6 +1024,31 @@ def _convert_krea_lora_to_diffusers(state_dict, model=None, log_prefix="[LoRA]")
             continue
         mapped_this = False
 
+        # (0) Table-parameter targets (last.modulation.lin -> final_layer.
+        # scale_shift_table [2, dim]): a bare nn.Parameter, not a Linear, so PEFT
+        # cannot wrap it. Reconstruct the full (tiny) delta from the low-rank
+        # factors and route it through the direct-merge path instead. Without
+        # this, the single most color-relevant tensor in a modulation delta is
+        # silently dropped.
+        if diff_mod.endswith("scale_shift_table"):
+            down, up = g.get("down"), g.get("up")
+            if down is not None and up is not None and down.ndim == 2 and up.ndim == 2:
+                rank = down.shape[0]
+                alpha = g.get("alpha")
+                scale = (float(alpha.item()) / rank) if (alpha is not None and rank > 0) else 1.0
+                delta = (up.float() @ down.float()) * scale
+                shp = param_shapes.get(diff_mod) if param_shapes else None
+                if shp is not None and tuple(delta.shape) != shp:
+                    if delta.numel() == _prod(shp):
+                        delta = delta.reshape(shp)
+                    else:
+                        print(f"{log_prefix}   Krea map: table delta shape mismatch {tok}->"
+                              f"{diff_mod} ({tuple(delta.shape)} vs {shp}); skipped")
+                        continue
+                direct.setdefault(diff_mod, {})["param"] = delta
+                n_map += 1
+            continue
+
         # (1) Low-rank LoRA ------------------------------------------------
         down, up = g.get("down"), g.get("up")
         if (down is not None and up is not None
@@ -1096,6 +1125,30 @@ def _apply_krea_direct_deltas(pipe, deltas, adapter_name, log_prefix="[LoRA]",
     applied = 0
     skipped = 0
     for mod_path, d in deltas.items():
+        # Direct table-parameter delta: mod_path IS the full parameter path
+        # (e.g. final_layer.scale_shift_table); no .weight/.bias suffix exists.
+        pdelta = d.get("param")
+        if pdelta is not None:
+            param = params.get(mod_path)
+            if param is None:
+                skipped += 1
+            else:
+                dv = pdelta.to(dtype=torch.float32)
+                ok = True
+                if tuple(dv.shape) != tuple(param.shape):
+                    try:
+                        dv = dv.reshape(param.shape)
+                    except RuntimeError:
+                        print(f"{log_prefix}   param delta shape mismatch for {mod_path}: "
+                              f"{tuple(pdelta.shape)} vs {tuple(param.shape)}, skipping")
+                        skipped += 1
+                        ok = False
+                if ok:
+                    if mod_path not in backup:
+                        backup[mod_path] = param.data.clone()
+                    param.data.add_((dv * float(weight)).to(dtype=param.dtype,
+                                                            device=param.device))
+                    applied += 1
         for suffix in ("weight", "bias"):
             delta = d.get(suffix)
             if delta is None:

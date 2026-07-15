@@ -29,7 +29,7 @@ import re
 # Preset sections -> their JSON library file (package root). Each file holds
 # { presetName: { <section>: { ...field: value... } } }. One file per section
 # preserves the original ultra_presets.json shape and back-compat.
-_ALLOWED_SECTIONS = ("ultra", "loader", "lora", "sigmas")
+_ALLOWED_SECTIONS = ("ultra", "loader", "lora", "sigmas", "apply_lora", "decode_vae")
 
 # Never persist per-run values into a reusable recipe. Any "*_preset" control
 # widget (ultra_preset / loader_preset / lora_preset ...) is stripped too.

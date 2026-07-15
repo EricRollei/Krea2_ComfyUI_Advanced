@@ -5,6 +5,86 @@ All notable changes to Eric_Krea2 are documented here. Format loosely based on
 
 ## Unreleased
 
+### Added - reference-latent edit pathway (EXPERIMENTAL, untested on live model)
+- **New `Eric Krea2 Reference Latents (Edit)` node + `_ref_latents.py`** - diffusers
+  implementation of ai-toolkit's "index_timestep_zero" reference method (mechanism
+  per ostris/ComfyUI-Krea2-Ostris-Edit, reimplemented against our installed
+  `transformer_krea2.py`, not copied): references are VAE-encoded via
+  `standard_encode`, flow-packed, appended to the image token sequence with RoPE
+  axis-0 index i+1 and **t=0** modulation, and sliced out of the prediction. The
+  Ultra node gains an optional `ref_latents` input; the transformer-forward wrap is
+  installed/removed around generation (cancel-safe, covers both the pipe() and
+  res-solver call paths, LoRA-transparent). Requires an edit-trained LoRA (e.g. the
+  Civitai Krea 2 Style Reference LoRA @1.0); Turbo/guidance-0 intended (with CFG,
+  refs condition both passes and partially cancel). kv_cache mode not implemented.
+
+### Changed - prompt nodes follow the community Krea-2 outline
+- **`Eric Krea2 Prompt`**: new optional `pose_action`, `appearance_clothing`,
+  `props_materials` fields; output is now TWO paragraphs (P1 subjects+backdrop,
+  P2 visual treatment) with `style_medium` moved LAST (was 2nd). All old fields
+  kept, so saved workflows load; output text (and therefore images) changes.
+- **`Eric Krea2 Magic Prompt`**: default expander system prompt rewritten to the
+  two-paragraph subject->...->aesthetic ordering (HF Krea-2-Turbo discussion #4),
+  prose-not-keywords, ~350-word cap; `status` now warns when the expansion's
+  heuristic Qwen3-VL token count likely exceeds the 512-token encode budget
+  (which the pipeline truncates silently).
+
+### Added - LoRA & decode-VAE quality-of-life
+- **Ultra widget reorder (BREAKING for saved workflows)** - panel now groups
+  framing/output-prep fields up top (`crop_bottom` / `crop_overgen` /
+  `init_match_size` / `width` / `height` moved to just after `seed_mode`) so the
+  S1 color block is contiguous, and `s1_s2_upscale_vae` moved to sit directly
+  above `upscale_to_stage2` (all three stage-transition fields now adjacent to
+  their stage). Positional `widgets_values` in previously saved workflows will
+  misalign on load - re-apply an ultra preset (name-keyed, unaffected) or
+  re-check values, then re-save.
+- **Per-stage color coding (new `krea2_stage_colors.js`)** - the Ultra V1/V2,
+  Sigmas, and Multi-LoRA nodes now draw a pure `onDrawForeground` overlay (no
+  widgets added, so `widgets_values` / saved workflows are untouched): a full
+  color outline frames each contiguous stage group, with a gutter bar +
+  vertical S1/S2/S3 tag inside it, and inner focus rings around the
+  stage-transition fields (`upscale_to_stage2` / `upscale_to_stage3` /
+  `s1_s2_upscale_vae`) in the color of the stage they feed INTO. Each group
+  gets a translucent color wash over its whole block (reads at overview zoom),
+  line widths are zoom-compensated, single-row groups draw only a gutter tick
+  (no box-per-row on Multi-LoRA), and beneath the stage hues two muted neutral
+  families cover the rest of the Ultra panel: general/setup (slate `#7e93ad`,
+  tag GEN) and conditioning/experimental (lavender `#a48ae0`, tag CND);
+  preset dropdowns and prompt boxes stay bare deliberately. On the Ultra
+  nodes, INACTIVE stages dim live (desaturated/darker + "S2 OFF" tag):
+  `upscale_to_stage2 == 0` dims S2+S3, `upscale_to_stage3 == 0` dims S3
+  (S3 requires S2, mirroring generate()). Palette
+  matches the sigmas-preview plot (S1 cyan `#4fd1e0`, S2 orange `#f0a030`,
+  S3 green `#7bd66a`) so the package speaks one color language.
+- **Apply LoRA: presets + on/off toggle** - the single Apply-LoRA node now has an
+  `enabled` toggle (OFF = pass the pipeline through untouched without clearing
+  the panel) and its own preset system (`apply_lora_preset` dropdown + ★ Save
+  Preset button, library `apply_lora_presets.json`, section `apply_lora`). Kept
+  separate from the MultiLoRA `lora` section because the widget names differ.
+  New widgets are appended at the END of the panel so existing workflows'
+  positional `widgets_values` still line up. (It already had a `settings`
+  output - unchanged.)
+- **Decode VAE Loader: models/vae dropdown + presets** - new `vae_name` dropdown
+  populated from ComfyUI's registered `models/vae` folders (incl.
+  extra_model_paths); a pick takes precedence over the free-form `vae_source`
+  and resolves through `folder_paths.get_full_path`. Plus a `decode_vae_preset`
+  dropdown + ★ Save Preset (library `decode_vae_presets.json`, section
+  `decode_vae`). Both appended at the end of the panel for workflow back-compat.
+  Note: the pick must still be a Wan-2.1-family / Qwen-Image VAE
+  (AutoencoderKLWan) - SD/SDXL/FLUX VAEs in that folder will not load.
+
+### Changed - Multi-LoRA per-slot per-stage strengths (BREAKING)
+- **`strength_i` replaced by `strength_is1` / `strength_is2` / `strength_is3`** -
+  each slot now exposes its S1/S2/S3 stage weights directly (set all three equal
+  for the old uniform behaviour). The single-strength + per-stage-toggle design
+  was judged too busy for a multi-stack. BREAKING for saved workflows containing
+  the MultiLoRA node: the widget count per slot changed, so positional
+  `widgets_values` misalign - re-set the node once and re-save. No saved
+  `lora_presets.json` existed at the time of the change; old-shape presets /
+  API prompts that still carry `strength_i` are honoured as the fallback for
+  all three stages. The image-recipe → preset bridge (`lora_list_to_slots`)
+  now emits the per-stage keys from `weight_s1/s2/s3`.
+
 ### Added - INT8 ConvRot checkpoint support (component loader)
 - **INT8 / INT8-ConvRot dequantization** - the component loader's single-file
   paths (transformer and text encoder) now load native-ComfyUI INT8 checkpoints,

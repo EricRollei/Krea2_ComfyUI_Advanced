@@ -100,12 +100,46 @@ class EricKrea2ApplyLoRA:
                                "is ephemeral, the whole stack is cleared after the run."}),
                 "lora_path_override": ("STRING", {"default": "",
                     "tooltip": "Optional absolute path to a LoRA file (overrides the dropdown)."}),
+                # New widgets are appended at the END so old workflows' positional
+                # widgets_values arrays still line up (missing tail -> defaults).
+                "enabled": ("BOOLEAN", {"default": True, "label_on": "on", "label_off": "off",
+                    "tooltip": "Quick on/off for this node without clearing its settings. OFF = pass "
+                               "the pipeline through untouched (the LoRA is not queued this run)."}),
+                "apply_lora_preset": (_settings.list_preset_names("apply_lora"), {"default": "custom",
+                    "tooltip": "Load a saved Apply-LoRA recipe (lora / strength / per-stage weights / "
+                               "toggles) into the panel for this run. 'custom' = use the panel as-is. "
+                               "Use the \u2605 Save Preset button to add one; the list refreshes on "
+                               "graph reload."}),
             },
         }
 
     def apply_lora(self, pipeline, lora_name, strength=1.0,
                    per_stage_weights=False, weight_s1=1.0, weight_s2=1.0, weight_s3=1.0,
-                   ephemeral=True, lora_path_override=""):
+                   ephemeral=True, lora_path_override="", enabled=True,
+                   apply_lora_preset="custom"):
+        # Headless / API-run fallback: apply a named preset over the panel values
+        # (the JS normally writes these into the visible widgets at edit time).
+        if apply_lora_preset and apply_lora_preset != "custom":
+            _vals = {
+                "lora_name": lora_name, "strength": strength,
+                "per_stage_weights": per_stage_weights,
+                "weight_s1": weight_s1, "weight_s2": weight_s2, "weight_s3": weight_s3,
+                "ephemeral": ephemeral, "lora_path_override": lora_path_override,
+                "enabled": enabled,
+            }
+            n = _settings.apply_named_preset("apply_lora", apply_lora_preset, _vals,
+                                             valid_keys=set(_vals.keys()))
+            (lora_name, strength, per_stage_weights, weight_s1, weight_s2, weight_s3,
+             ephemeral, lora_path_override, enabled) = (
+                _vals["lora_name"], _vals["strength"], _vals["per_stage_weights"],
+                _vals["weight_s1"], _vals["weight_s2"], _vals["weight_s3"],
+                _vals["ephemeral"], _vals["lora_path_override"], _vals["enabled"])
+            print(f"[EricKrea2-LoRA] apply_lora_preset '{apply_lora_preset}': applied {n} field(s).")
+
+        if not enabled:
+            print("[EricKrea2-LoRA] Apply LoRA is toggled OFF - passing pipeline through.")
+            return (pipeline, _stack_settings(pipeline.get("lora_stack", [])))
+
         # Resolve path
         if lora_path_override and lora_path_override.strip():
             lora_path = lora_path_override.strip()

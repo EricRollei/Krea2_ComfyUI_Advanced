@@ -25,14 +25,21 @@ from __future__ import annotations
 # text). Not a copy of Krea's expansion.txt.
 _DEFAULT_EXPANDER_SYSTEM = (
     "You are a prompt expander for the Krea 2 image model. Given a short user "
-    "prompt, rewrite it into a single long, dense, natural-language image "
-    "description. Preserve the user's subject and intent exactly and never "
-    "introduce unrelated subjects. Add concrete visual detail: medium and style, "
-    "materials and textures, lighting, color palette, camera and lens, angle and "
-    "distance, composition, and mood. Prefer specific, art-directed or "
-    "photographic language. If the user specifies words that must appear as text "
-    "in the image, keep them inside double quotes. Output only the expanded "
-    "prompt as a single paragraph, with no preamble, labels, or surrounding quotes."
+    "prompt, rewrite it into a rich, flowing natural-language image description of "
+    "one or two paragraphs. Preserve the user's subject and intent exactly and "
+    "never introduce unrelated subjects. Start directly with the main subject - "
+    "never open with meta phrases like 'In this image' or 'The photo shows'. "
+    "Paragraph one covers the subjects and the backdrop: describe each subject in "
+    "turn - who or what it is, then its pose or action, then appearance, clothing "
+    "and props with concrete materials and textures - and weave the environment "
+    "and background in around them. Paragraph two covers the visual treatment: "
+    "composition, framing and perspective, camera and lens if photographic, "
+    "lighting, color palette and mood, ending with the overall aesthetic and "
+    "medium. Write vivid, specific, art-directed or photographic prose - never "
+    "keyword lists or comma-stuffed tags. If the user specifies words that must "
+    "appear as text in the image, keep them inside double quotes. Keep the whole "
+    "description under about 350 words. Output only the expanded prompt, with no "
+    "preamble, labels, or surrounding quotes."
 )
 
 
@@ -173,9 +180,13 @@ class EricKrea2Prompt:
         return {
             "required": {"subject": ("STRING", {"multiline": True, "default": ""})},
             "optional": {
-                "scene": S(), "style_medium": S(), "lighting": S(),
-                "color": S(), "camera": S(), "composition": S(),
-                "mood": S(), "extra_details": S(),
+                # Field order mirrors the assembled output order (community Krea-2
+                # outline): P1 subject/pose/appearance/props + environment, P2
+                # composition/camera/lighting/color/mood with aesthetic&medium LAST.
+                "pose_action": S(), "appearance_clothing": S(), "props_materials": S(),
+                "scene": S(), "composition": S(), "camera": S(),
+                "lighting": S(), "color": S(), "mood": S(),
+                "style_medium": S(), "extra_details": S(),
                 "text_to_render": ("STRING", {"default": "",
                     "tooltip": "Words to render as text in the image (auto-wrapped in quotes)."}),
             },
@@ -186,14 +197,22 @@ class EricKrea2Prompt:
     FUNCTION = "build"
     CATEGORY = "Eric/Krea2"
 
-    def build(self, subject, scene="", style_medium="", lighting="", color="",
-              camera="", composition="", mood="", extra_details="", text_to_render=""):
-        parts = [subject, style_medium, scene, composition, camera, lighting,
-                 color, mood, extra_details]
-        prompt = ", ".join(p.strip() for p in parts if p and p.strip())
+    def build(self, subject, pose_action="", appearance_clothing="", props_materials="",
+              scene="", style_medium="", lighting="", color="", camera="", composition="",
+              mood="", extra_details="", text_to_render=""):
+        # Two-paragraph assembly per the community Krea-2 outline (HF Krea-2-Turbo
+        # discussion #4): P1 = subjects + backdrop, P2 = visual treatment, with
+        # aesthetic & medium LAST (it previously sat 2nd, right after subject).
+        def _join(parts):
+            return ", ".join(p.strip() for p in parts if p and p.strip())
+        para1 = _join([subject, pose_action, appearance_clothing, props_materials, scene])
+        para2 = _join([composition, camera, lighting, color, mood, style_medium, extra_details])
         if text_to_render and text_to_render.strip():
-            prompt += f', with the text "{text_to_render.strip()}"'
-        return (prompt,)
+            tail = f'with the text "{text_to_render.strip()}"'
+            para2 = f"{para2}, {tail}" if para2 else tail
+        chunks = [c if c.endswith((".", "!", "?")) else c + "."
+                  for c in (para1, para2) if c]
+        return ("\n\n".join(chunks),)
 
 
 class EricKrea2MagicPrompt:
@@ -311,7 +330,15 @@ class EricKrea2MagicPrompt:
                 msg = f"\u274c empty expansion from {via} - prompt passed through UNEXPANDED"
                 print(f"[EricKrea2] Magic Prompt: {msg}")
                 return (prompt, msg)
-            msg = f"\u2705 expanded {len(prompt)} -> {len(expanded)} chars via {via}"
+            # Heuristic Qwen3-VL token estimate (~3.5 chars/token for English prose).
+            # Krea2's encode budget is a FIXED max_sequence_length (default 512) minus
+            # template suffix; anything over is silently truncated by the pipeline -
+            # and max_tokens above counts the EXPANDER LLM's tokens, not Qwen3-VL's.
+            est_tokens = int(len(expanded) / 3.5)
+            warn = (f" \u26a0 ~{est_tokens} tokens (heuristic) likely exceeds Krea2's "
+                    f"512-token budget - the tail will be silently truncated at encode"
+                    ) if est_tokens > 500 else ""
+            msg = f"\u2705 expanded {len(prompt)} -> {len(expanded)} chars via {via}{warn}"
             print(f"[EricKrea2] Magic Prompt: {msg}")
             return (expanded, msg)
         except Exception as e:

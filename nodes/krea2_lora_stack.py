@@ -8,7 +8,7 @@ holds many LoRA slots but only shows the ones you use (plus one empty slot).
 
 How the "grows as needed" UI works
 ----------------------------------
-The node statically declares ``MAX_SLOTS`` rows (``lora_1``/``strength_1`` ...).
+The node statically declares ``MAX_SLOTS`` rows (``lora_1``/``strength_1s1..s3`` ...).
 That keeps ComfyUI's native dropdowns (auto-populated from the loras folder) and
 100% native serialization - nothing custom to save/restore. A small JS extension
 (``web/js/krea2_lora_stack.js``) simply HIDES every row past the last used one +1,
@@ -21,8 +21,10 @@ loads the whole stack fresh at generation and (if any entry is ephemeral) clears
 it afterward. Chain this after / before single Apply-LoRA nodes freely; adapter
 names are de-duped across the whole stack.
 
-Per-slot per-stage weights are intentionally omitted here to stay compact - use
-the single "Apply LoRA" node for per-stage (S1/S2/S3) weighting.
+Each slot carries three per-stage strengths (``strength_is1/is2/is3`` for
+stages S1/S2/S3) instead of a single strength + a mode toggle - set all three
+equal for a uniform weight, or shape them per stage (e.g. detail LoRA
+0 / 0.7 / 1.0, style LoRA 1.0 / 0.6 / 0.3).
 
 Author: Eric Hiss (GitHub: EricRollei)
 """
@@ -71,9 +73,16 @@ class EricKrea2MultiLoRA:
                             "activate it - a new empty slot appears below. 'none' = unused/off."
                             if i == 1 else
                             f"LoRA slot {i}. 'none' = unused/off.")})
-            optional[f"strength_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 50000,
+            optional[f"strength_{i}s1"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 50000,
                 "step": 0.05,
-                "tooltip": f"Weight for LoRA slot {i} (applied to all stages)."})
+                "tooltip": f"Slot {i} weight during Stage-1 (composition). Set all three equal "
+                           "for a uniform strength."})
+            optional[f"strength_{i}s2"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 50000,
+                "step": 0.05,
+                "tooltip": f"Slot {i} weight during Stage-2 (refine)."})
+            optional[f"strength_{i}s3"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 50000,
+                "step": 0.05,
+                "tooltip": f"Slot {i} weight during Stage-3 (final detail)."})
         return {"required": {"pipeline": ("KREA2_PIPELINE",)}, "optional": optional}
 
     def apply(self, pipeline, ephemeral=True, lora_preset="custom", **kwargs):
@@ -104,7 +113,12 @@ class EricKrea2MultiLoRA:
             if path is None:
                 print(f"[EricKrea2-LoRA] Multi-LoRA slot {i}: '{name}' not found, skipped.")
                 continue
-            strength = float(kwargs.get(f"strength_{i}", 1.0))
+            # Per-stage strengths. An old-style preset / API prompt may still carry a
+            # single strength_{i}: honour it as the fallback for all three stages.
+            legacy = kwargs.get(f"strength_{i}", 1.0)
+            s1 = float(kwargs.get(f"strength_{i}s1", legacy))
+            s2 = float(kwargs.get(f"strength_{i}s2", legacy))
+            s3 = float(kwargs.get(f"strength_{i}s3", legacy))
 
             adapter_name = _sanitize_adapter_name(path)
             if adapter_name in existing:   # de-dupe across the whole stack
@@ -119,10 +133,10 @@ class EricKrea2MultiLoRA:
                 "filename": os.path.basename(path),
                 "lora_name": name,
                 "adapter_name": adapter_name,
-                "strength": strength,
-                "weight_s1": strength,
-                "weight_s2": strength,
-                "weight_s3": strength,
+                "strength": s1,          # legacy field; realization uses weight_s1/s2/s3
+                "weight_s1": s1,
+                "weight_s2": s2,
+                "weight_s3": s3,
                 "ephemeral": bool(ephemeral),
             })
             added += 1

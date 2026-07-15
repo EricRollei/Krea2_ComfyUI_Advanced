@@ -29,9 +29,14 @@ No dependency on any other node pack.
 - **Presets everywhere.** Named JSON presets per section (loader / LoRA / Ultra /
   sigmas) with a ★ Save button, a Merge Settings node, and Settings-from-Image for
   one-click reproduction of a saved image's recipe.
-- **LoRA with per-stage settings.** Apply / unload / diagnose plus a Multi-LoRA
-  Stack - and per-stage weights (S1/S2/S3), so a LoRA can steer composition harder
-  than final detail (or vice-versa) within a single multi-stage run.
+- **LoRA with per-stage settings + presets.** Apply / unload / diagnose plus a
+  Multi-LoRA Stack - *both* with per-stage weights (S1/S2/S3), so a LoRA can steer
+  composition harder than final detail (or vice-versa) within a single multi-stage
+  run, and *both* with named-preset save/load (★ Save) for one-click recall.
+- **Reference-latent edit pathway.** With an edit-trained LoRA loaded, a Reference
+  Latents node feeds VAE-encoded reference images through the ai-toolkit
+  "index_timestep_zero" method - real pixel/structure conditioning (distinct from
+  Vision Prompt's semantic grounding), reimplemented against our diffusers transformer.
 - **Custom flow-matching samplers, no external solver.** `res_2m`, `res_2s`,
   `deis_3m`, `deis_4m` re-implemented from the RES/DEIS papers, selectable per
   stage, with schedule + `detail_bias` control.
@@ -60,10 +65,17 @@ No dependency on any other node pack.
 - **Resolution & latent helpers** - a **Resolution** node (aspect+MP or
   image-derived size → `width`/`height`/blank latent) and a latent-space
   **Latent Resize** (bislerp, no VAE round-trip).
-- **Presets & settings** - named JSON presets per section (loader / LoRA / Ultra /
-  sigmas) with a ★ Save button, a **Merge Settings** node, and **Settings from
-  Image** for one-click reproduction.
-- **LoRA tooling** - apply / unload / diagnose plus a **Multi-LoRA Stack**.
+- **Presets & settings** - named JSON presets per section (loader / component loader /
+  Apply LoRA / LoRA stack / Ultra / sigmas) with a ★ Save button, a **Merge Settings**
+  node, and **Settings from Image** for one-click reproduction.
+- **LoRA tooling** - apply / unload / diagnose plus a **Multi-LoRA Stack**, both with
+  **per-stage weights** (S1/S2/S3) and named-preset save/load (★ Save).
+- **Reference Latents (edit LoRAs)** - a **Reference Latents** node VAE-encodes 1-3
+  reference images into the ai-toolkit "index_timestep_zero" edit pathway, fed via a new
+  optional `ref_latents` input on the Multi-Stage Ultra (res) node. Works *only* with an
+  edit-trained LoRA loaded (e.g. the Krea 2 Style Reference LoRA on Turbo at guidance 0);
+  the base model can't read reference tokens. See
+  [Reference Latents](#reference-latents-edit-lora-image-conditioning).
 - **Upscale VAE quality-pass modes** - the trained spacepxl Wan 2× decoder can drive
   the S2→S3 jump and/or the final decode, each with a **downsample** variant that keeps
   its sharp detail but resamples down to your chosen size instead of forcing 4× area.
@@ -105,7 +117,7 @@ diffusers/transformers build new enough to expose it.
 |------|------|
 | **Eric Krea2 Loader** | Loads `Krea2Pipeline` (Raw or Turbo), applies `attention_backend`, caches in VRAM. Auto-detects `is_distilled`. Preset dropdown. |
 | **Eric Krea2 Generate** | Text-to-image. Emits `IMAGE` + a chainable `KREA2_LATENT`. `auto_settings` picks 8/0 for Turbo, 28/4.5 for Raw. |
-| **Eric Krea2 Multi-Stage Ultra (res)** | Up to 3-stage progressive high-res with the custom RES/DEIS samplers, per-stage schedules, img2img `init_latent`, and `width`/`height` overrides. Best on Raw. |
+| **Eric Krea2 Multi-Stage Ultra (res)** | Up to 3-stage progressive high-res with the custom RES/DEIS samplers, per-stage schedules, img2img `init_latent`, an optional `ref_latents` edit input, and `width`/`height` overrides. Best on Raw. |
 | **Eric Krea2 Multi-Stage Ultra V2 (presets)** | Preset-driven variant of the Ultra node - serialises every widget (incl. `sigmas`, `width`/`height`) into one reproducible recipe. |
 
 ### Sampling & scheduling
@@ -123,6 +135,7 @@ Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
 | Node | Does |
 |------|------|
 | **Eric Krea2 VAE Encode** | Encodes an `IMAGE` → `KREA2_LATENT` (the img2img primitive). |
+| **Eric Krea2 Reference Latents (Edit)** | VAE-encodes 1-3 reference images → `KREA2_REF_LATENTS` for the Ultra (res) node's `ref_latents` input (ai-toolkit "index_timestep_zero" edit method). **Needs an edit-trained LoRA** to do anything; the base model ignores reference tokens. See [Reference Latents](#reference-latents-edit-lora-image-conditioning). |
 | **Eric Krea2 Resolution** | Size from `aspect_ratio` + `megapixels` or a source image → `width`/`height`/`dims` + a blank `KREA2_LATENT` (noise or zeros). |
 | **Eric Krea2 Latent Resize** | Resize a `KREA2_LATENT` in latent space (bislerp, no VAE round-trip): `scale` / `dimensions` / `megapixels`. |
 | **Eric Krea2 Latent → ComfyUI LATENT** | Bridge a `KREA2_LATENT` to a stock ComfyUI `LATENT`. |
@@ -143,8 +156,8 @@ Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
 | **Eric Krea2 Merge Settings** | Merges section recipe strings into one `KREA2_SETTINGS` (dicts updated, `lora` lists concatenated). |
 | **Eric Krea2 Settings from Image** | Reads an image's embedded generation settings back into a `KREA2_SETTINGS` recipe. |
 | **Eric Krea2 Component Loader** | Loads pipeline components with a preset dropdown. |
-| **Eric Krea2 Apply LoRA** / **Unload LoRA** / **Diagnose LoRA** | Apply, cleanly remove, and inspect LoRA adapters on the cached pipeline. Apply LoRA supports **per-stage weights** (`per_stage_weights` + `weight_s1`/`weight_s2`/`weight_s3`) so a LoRA's strength can differ across S1/S2/S3 in a multi-stage run. |
-| **Eric Krea2 Multi-LoRA Stack** | Stack several LoRAs with per-adapter weights and toggles; preset dropdown. (Per-slot per-stage weights are intentionally omitted here to stay compact - use **Apply LoRA** for S1/S2/S3 weighting.) |
+| **Eric Krea2 Apply LoRA** / **Unload LoRA** / **Diagnose LoRA** | Apply, cleanly remove, and inspect LoRA adapters on the cached pipeline. Apply LoRA supports **per-stage weights** (`per_stage_weights` + `weight_s1`/`weight_s2`/`weight_s3`) so a LoRA's strength can differ across S1/S2/S3 in a multi-stage run, plus a **preset dropdown** (`apply_lora_preset` + ★ Save). |
+| **Eric Krea2 Multi-LoRA Stack** | Stack several LoRAs in one growable node - each slot has **per-stage weights** (`strength_Ns1`/`s2`/`s3` for S1/S2/S3) and an on/off toggle, plus a shared `ephemeral` switch and a **preset dropdown** (`lora_preset` + ★ Save). Unused rows auto-hide until needed. |
 | **Eric Krea2 Unload Models** | Free VRAM on demand. |
 | **Eric Krea2 Save Latent (debug)** | Save/inspect a packed latent for debugging. |
 
@@ -266,19 +279,23 @@ Qwen3-VL VLM, not text-only), so the resulting conditioning is visually grounded
 those images - a "prompt from a picture" effect - without training anything and
 without the pitfalls of the community pattern of reusing the core
 `TextEncodeQwenImageEditPlus` node for this: that node's VAE-encoded reference goes
-nowhere (Krea2's DiT has no reference-latent pathway - `Krea2.extra_conds` never reads
-reference_latents, so it's silently discarded), and it falls back to Qwen3-VL's
-generic image-description template once an image is attached instead of the
+nowhere (the *base* Krea2 DiT has no reference-latent pathway - `Krea2.extra_conds`
+never reads reference_latents, so it's silently discarded; an edit-trained LoRA is what
+adds one, exposed separately via the
+[Reference Latents](#reference-latents-edit-lora-image-conditioning) node), and it falls
+back to Qwen3-VL's generic image-description template once an image is attached instead of the
 descriptor template Krea2 was actually conditioned with. This node has no VAE step at
 all (nothing to discard) and always uses Krea2's own `prompt_template_encode_prefix`/
 `_suffix`, read straight off the loaded pipeline so it can't drift out of sync.
 
-**This is semantic grounding, not pixel editing.** No reference-latent pathway means
-no structure/identity preservation from the image alone - for that, pair it with
-img2img (below): img2img supplies structure (what to start denoising from),
+**This is semantic grounding, not pixel editing.** With no reference-latent pathway of
+its own it gives no structure/identity preservation from the image alone - for that,
+pair it with img2img (below): img2img supplies structure (what to start denoising from),
 Vision Prompt supplies content (what to draw toward). They're independent channels
 into the transformer and compose freely, including with different source images
-for each.
+for each. (If you have an edit-trained LoRA, the
+[Reference Latents](#reference-latents-edit-lora-image-conditioning) node adds a third,
+pixel-level channel.)
 
 **Positive-conditioning only.** Steering *toward* a reference makes sense; steering
 *away* from one is a much stranger ask, and Turbo (the primary target) mostly runs
@@ -300,6 +317,38 @@ truncating into the image-token block (which corrupts position ids and crashes d
 inside `get_rope_index` with a cryptic shape-mismatch instead). `vision_megapixels` is
 a ceiling on top of the auto-share, not a replacement for it - lower it to reserve more
 room for a long prompt.
+
+## Reference Latents (edit-LoRA image conditioning)
+
+```
+Load Image(s) -> Eric Krea2 Reference Latents -> (ref_latents) Multi-Stage Ultra (res)
+```
+
+A second, *pixel-level* way to condition on a reference image - complementary to
+[Vision Prompt](#vision-prompt-image-grounded-conditioning)'s semantic grounding. Each
+reference image is VAE-encoded and flow-packed exactly like a generation latent, then its
+tokens are appended to the image sequence and modulated at **t = 0** (clean data) - the
+ai-toolkit "index_timestep_zero" edit method. The velocity prediction is sliced back to
+the live image tokens, so the references only *inform* the denoise, they aren't denoised
+themselves.
+
+**Requires an edit-trained LoRA.** The base Krea2 model was never trained to read these
+tokens - this pathway only does something useful with an ai-toolkit `krea2` edit LoRA
+(`model_kwargs.edit: true`) loaded, e.g. the Civitai **Krea 2 Style Reference LoRA**.
+Without one, the reference tokens are appended but effectively ignored (and you just pay
+their compute cost - ~2048 tokens per 1 MP ref, per denoise step).
+
+**Recommended wiring** (matches the Style Reference LoRA's training setup):
+- the reference image(s) → **Reference Latents** (`max_ref_megapixels` 1.0) → `ref_latents`;
+- the *same* image(s) → **Vision Prompt** (`vision_megapixels` ≈ 0.15) → `prompt_conditioning`;
+- the edit LoRA in the **Multi-LoRA Stack** at strength 1.0;
+- **Turbo** checkpoint at **guidance 0**.
+
+**CFG caveat.** The transformer-forward wrapper can't tell a positive pass from a negative
+one, so with guidance enabled the references condition *both* passes and partially cancel
+in the CFG delta. Keep it on Turbo at `g = 0` (which is what the published edit LoRAs
+target anyway). This is an independent diffusers-side reimplementation of the published
+mechanism (mechanism credit: ostris / ai-toolkit), not a port.
 
 ## Two high-res strategies
 
@@ -428,6 +477,11 @@ Turbo pipelines simply can't feed one.
   wastes a silently-discarded reference latent and uses the wrong prompt template.
   This is an independent implementation built directly against the installed
   diffusers/transformers source, not a port of that node's code.
+- **Reference Latents (edit):** the \"index_timestep_zero\" reference method is credited
+  to ostris / ai-toolkit (the Krea2 edit-LoRA training recipe) and
+  [ostris/ComfyUI-Krea2-Ostris-Edit](https://github.com/ostris) for the ComfyUI-core
+  implementation. This is an independent diffusers-side reimplementation verified
+  line-by-line against the installed `transformer_krea2.py`, not a port.
 - **Nodes:** Eric Hiss (GitHub: EricRollei).
 
 These nodes are an independent implementation; no code is copied from Krea or

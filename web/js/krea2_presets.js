@@ -33,6 +33,14 @@ const PRESET_NODES = {
         section: "sigmas", presetWidget: "sigmas_preset",
         skip: ["control_after_generate", "sigmas_preset"],
     },
+    EricKrea2ApplyLoRA: {
+        section: "apply_lora", presetWidget: "apply_lora_preset",
+        skip: ["control_after_generate", "apply_lora_preset"],
+    },
+    EricKrea2DecodeVAELoader: {
+        section: "decode_vae", presetWidget: "decode_vae_preset",
+        skip: ["control_after_generate", "decode_vae_preset"],
+    },
 };
 
 function findWidget(node, name) {

@@ -173,8 +173,8 @@ def extract_from_png(path: str, key: str = "") -> dict:
 
 def lora_list_to_slots(entries, max_slots: int = 10) -> dict:
     """Convert a settings 'lora' LIST into MultiLoRA widget slots (a flat dict:
-    ``lora_i`` / ``strength_i`` / ``on_i`` + ``ephemeral``) so an image's realized
-    stack can be saved as a selectable MultiLoRA preset."""
+    ``lora_i`` / ``strength_is1/is2/is3`` / ``on_i`` + ``ephemeral``) so an image's
+    realized stack can be saved as a selectable MultiLoRA preset."""
     out = {}
     if not isinstance(entries, list):
         return out
@@ -182,10 +182,15 @@ def lora_list_to_slots(entries, max_slots: int = 10) -> dict:
         if not isinstance(e, dict):
             continue
         out[f"lora_{idx}"] = e.get("lora_name") or e.get("filename") or "none"
-        try:
-            out[f"strength_{idx}"] = float(e.get("strength", 1.0))
-        except Exception:
-            out[f"strength_{idx}"] = 1.0
+        base = e.get("strength", 1.0)
+        for stage in ("s1", "s2", "s3"):
+            v = e.get(f"weight_{stage}")
+            if v is None:            # (0.0 is a legitimate per-stage weight)
+                v = base
+            try:
+                out[f"strength_{idx}{stage}"] = float(v)
+            except Exception:
+                out[f"strength_{idx}{stage}"] = 1.0
         out[f"on_{idx}"] = True
     for e in entries:
         if isinstance(e, dict) and "ephemeral" in e:

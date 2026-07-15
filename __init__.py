@@ -21,13 +21,15 @@ try:
                         krea2_multistage_ultra, krea2_multistage_ultra_v2, krea2_lora,
                         krea2_lora_stack, krea2_component_loader, krea2_settings,
                         krea2_settings_from_image, krea2_sigmas, krea2_resolution, krea2_latent_resize,
-                        krea2_prompt, krea2_vision_prompt, krea2_debug, krea2_unload)
+                        krea2_prompt, krea2_vision_prompt, krea2_ref_latents, krea2_debug,
+                        krea2_unload)
     from . import _upscale_vae
     _MODULES += [krea2_loader, krea2_generate, krea2_decode, krea2_encode,
                  krea2_multistage_ultra, krea2_multistage_ultra_v2, krea2_lora,
                  krea2_lora_stack, krea2_component_loader, krea2_settings,
                  krea2_settings_from_image, krea2_sigmas, krea2_resolution, krea2_latent_resize,
-                 krea2_prompt, krea2_vision_prompt, krea2_debug, krea2_unload, _upscale_vae]
+                 krea2_prompt, krea2_vision_prompt, krea2_ref_latents, krea2_debug,
+                 krea2_unload, _upscale_vae]
 except Exception as e:  # pragma: no cover - surfaced in ComfyUI console
     import traceback
     print(f"[Eric_Krea2] Failed to import nodes: {e}")

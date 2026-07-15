@@ -14,14 +14,16 @@ const NODE_CLASS = "EricKrea2MultiLoRA";
 const MAX = 10;                 // must match EricKrea2MultiLoRA.MAX_SLOTS
 const HIDDEN_TYPE = "krea2hidden";
 
-// Collect the (enable, lora, strength) widget triples in slot order.
+// Collect the (enable, lora, per-stage strengths) widget groups in slot order.
 function rowPairs(node) {
     const out = [];
     for (let i = 1; i <= MAX; i++) {
         const ow = (node.widgets || []).find((w) => w.name === `on_${i}`);
         const lw = (node.widgets || []).find((w) => w.name === `lora_${i}`);
-        const sw = (node.widgets || []).find((w) => w.name === `strength_${i}`);
-        if (lw && sw) out.push({ i, ow, lw, sw });
+        const sws = ["s1", "s2", "s3"]
+            .map((s) => (node.widgets || []).find((w) => w.name === `strength_${i}${s}`))
+            .filter(Boolean);
+        if (lw && sws.length) out.push({ i, ow, lw, sws });
     }
     return out;
 }
@@ -52,8 +54,8 @@ function relayout(node) {
     }
     const visible = Math.min(MAX, Math.max(1, lastUsed + 1));
     for (const p of ps) {
-        if (p.i <= visible) { if (p.ow) showWidget(p.ow); showWidget(p.lw); showWidget(p.sw); }
-        else { if (p.ow) hideWidget(p.ow); hideWidget(p.lw); hideWidget(p.sw); }
+        if (p.i <= visible) { if (p.ow) showWidget(p.ow); showWidget(p.lw); p.sws.forEach(showWidget); }
+        else { if (p.ow) hideWidget(p.ow); hideWidget(p.lw); p.sws.forEach(hideWidget); }
     }
     // Re-fit height, keep the current width.
     const sz = node.computeSize();

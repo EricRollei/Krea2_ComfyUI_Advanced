@@ -20,6 +20,9 @@ dist/
 .eggs/
 pip-wheel-metadata/
 
+# ComfyUI Registry publish artifact (`comfy node publish` output)
+node.zip
+
 # Virtual environments
 .venv/
 venv/

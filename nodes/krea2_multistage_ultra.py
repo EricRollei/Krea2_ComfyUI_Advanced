@@ -249,6 +249,27 @@ def _rebalance_krea_embeds(embeds, layer_weights, multiplier):
     return embeds
 
 
+def _jitter_embeds(embeds, strength, generator):
+    """Seeded Gaussian perturbation of the conditioning ("text-encoder seed").
+
+    The TE forward is deterministic - there is nothing to seed there - so per-seed
+    conditioning variance is created here instead: e' = e + strength * std * N(0,1).
+    Distilled models map (noise, conditioning) -> image so contractively that varying
+    the init noise barely moves the layout, but small conditioning perturbations move
+    it a lot - this attacks diversity collapse in conditioning space (complementary
+    to the delta-LoRA weight-space and high-res noise-space approaches).
+
+    std is computed PER LAYER TAP on the (B, seq, n_layers, dim) Krea2 layout (the 12
+    Qwen3-VL taps have very different scales, especially after cond_rebalance), or
+    globally per batch for a flattened layout. Noise is drawn in fp32 from the given
+    generator and the result cast back to the input dtype."""
+    e = embeds.float()
+    dims = (1, e.dim() - 1) if e.dim() >= 3 else None
+    std = e.std(dim=dims, keepdim=True) if dims else e.std()
+    n = torch.randn(e.shape, generator=generator, device=e.device, dtype=torch.float32)
+    return (e + float(strength) * std * n).to(embeds.dtype)
+
+
 @torch.no_grad()
 def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
                         is_distilled, guidance_scale, eta, generator, progress_cb=None,
@@ -374,6 +395,13 @@ class EricKrea2MultistageUltra:
                                "stage exactly like a text-only prompt would (same tensor shape). cond_rebalance "
                                "still applies. 'prompt' is ignored for the positive side when this is connected, "
                                "but still used for the negative side and console logging."}),
+                "ref_latents": ("KREA2_REF_LATENTS", {
+                    "tooltip": "Optional reference latents (from Eric Krea2 Reference Latents). Appends "
+                               "VAE-encoded reference tokens to the image sequence at t=0 modulation "
+                               "(ai-toolkit 'index_timestep_zero' edit method). ONLY does something useful "
+                               "with an edit-trained LoRA loaded (e.g. the Krea 2 Style Reference LoRA at "
+                               "1.0); the base model ignores what it can't read. Intended for Turbo at "
+                               "guidance 0 - with CFG on, refs condition both passes and partially cancel."}),
                 "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "cond_preset": (["custom"] + sorted(cls._load_cond_presets().keys()), {"default": "custom",
                     "tooltip": "Preset library of rebalance profiles (from cond_presets.json). 'custom' "
@@ -392,15 +420,43 @@ class EricKrea2MultistageUltra:
                     "tooltip": "Comma-separated per-layer gains for the 12 Qwen3-VL taps (applied "
                                "before the global multiplier). Count must divide the conditioning "
                                "width (12 for Krea2). Reference emphasizes taps 8/9/11."}),
+                "cond_jitter": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.005,
+                    "tooltip": "Seeded Gaussian perturbation of the POSITIVE conditioning, as a fraction "
+                               "of its per-layer-tap std (0 = off). The 'text-encoder seed' diversity "
+                               "trick: distilled/Turbo models barely respond to init-noise changes but "
+                               "respond strongly to conditioning changes, so this restores seed-to-seed "
+                               "variety in conditioning space. Applied ONCE, identically for every stage "
+                               "(after cond_rebalance). Useful range ~0.01-0.10; high values drift off "
+                               "prompt. Negative conditioning is untouched."}),
+                "cond_jitter_seed": ("INT", {"default": -1, "min": -1, "max": 0xFFFFFFFFFFFFFFFF,
+                    "tooltip": "Seed for cond_jitter noise. -1 (default) = derived from the main seed "
+                               "(seed+777), so changing the main seed changes the jitter too - the "
+                               "diversity behaviour you usually want. >=0 = fixed independent seed: hold "
+                               "the jitter constant while sweeping noise seeds (or vice versa) to explore "
+                               "conditioning space and noise space separately."}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "seed_mode": (["same_all_stages", "offset_per_stage", "random_per_stage"], {
                     "default": "offset_per_stage",
                     "tooltip": "same_all_stages: one seed threaded through (reproducible). "
                                "offset_per_stage: S2=seed+1, S3=seed+2 (reproducible, decorrelated). "
                                "random_per_stage: S1 seeded, S2/S3 fresh random each run."}),
-                "aspect_ratio": (list(_ASPECT_RATIOS.keys()), {"default": "5:4 landscape"}),
-                "s1_megapixels": ("FLOAT", {"default": 3.00, "min": 0.25, "max": 16.0, "step": 0.05,
-                    "tooltip": "Stage-1 size in megapixels (dimensions derived from the aspect ratio)."}),
+                # framing / output prep (widget order only; crop applies to the FINAL stage)
+                "crop_bottom": ("INT", {"default": 0, "min": 0, "max": 96, "step": 2,
+                    "tooltip": "Crop N latent rows off the bottom of the FINAL executed stage to remove "
+                               "the boundary band the DiT re-forms on every denoise (1 latent row = 8 px "
+                               "at the final stage's resolution). 0 = off. Snapped to even (2x2 patch "
+                               "stride). Typical ~10-20 at final res; deeper S2/S3 sampling needs fewer."}),
+                "crop_overgen": ("BOOLEAN", {"default": True,
+                    "tooltip": "ON (recommended): the final stage makes disposable extra bottom rows "
+                               "(S1 generates taller; S2/S3 pad the upscaled latent) so the band forms "
+                               "in them and is trimmed - your target size/aspect is preserved and the "
+                               "real content is never stretched. OFF: trim the final latent directly "
+                               "(output ends up shorter by the crop)."}),
+                "init_match_size": ("BOOLEAN", {"default": True,
+                    "tooltip": "img2img only: match Stage 1 size to the init latent's own dimensions "
+                               "(preserves source resolution/aspect). OFF = use aspect_ratio + "
+                               "s1_megapixels and resize the init to fit (can reframe/stretch if the "
+                               "aspect differs)."}),
                 "width": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 16,
                     "tooltip": "Explicit Stage-1 width override (0 = derive from aspect_ratio + "
                                "s1_megapixels). Wire the Eric Krea2 Resolution node here to size Stage 1 "
@@ -410,6 +466,9 @@ class EricKrea2MultistageUltra:
                 "height": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 16,
                     "tooltip": "Explicit Stage-1 height override (0 = derive from aspect_ratio + "
                                "s1_megapixels). See 'width'. Both must be > 0 to take effect."}),
+                "aspect_ratio": (list(_ASPECT_RATIOS.keys()), {"default": "5:4 landscape"}),
+                "s1_megapixels": ("FLOAT", {"default": 3.00, "min": 0.25, "max": 16.0, "step": 0.05,
+                    "tooltip": "Stage-1 size in megapixels (dimensions derived from the aspect ratio)."}),
                 # Stage 1 - composition. Official steps: Turbo 8, Raw 28-52.
                 "s1_steps": ("INT", {"default": 10, "min": 1, "max": 200}),
                 "s1_cfg": ("FLOAT", {"default": 1.9, "min": 0.0, "max": 20.0, "step": 0.1,
@@ -444,11 +503,6 @@ class EricKrea2MultistageUltra:
                                "the init latent is re-noised at s1_start_step and denoised over "
                                "[s1_start_step, s1_end_step] instead of generating from pure noise. "
                                "Leave unconnected for normal text-to-image."}),
-                "init_match_size": ("BOOLEAN", {"default": True,
-                    "tooltip": "img2img only: match Stage 1 size to the init latent's own dimensions "
-                               "(preserves source resolution/aspect). OFF = use aspect_ratio + "
-                               "s1_megapixels and resize the init to fit (can reframe/stretch if the "
-                               "aspect differs)."}),
                 "s1_start_step": ("INT", {"default": 0, "min": 0, "max": 199,
                     "tooltip": "img2img only (needs init_latent): inject the init latent at this step of "
                                "the s1_steps schedule = the re-noise / denoise-strength control. 0 = full "
@@ -459,17 +513,13 @@ class EricKrea2MultistageUltra:
                                "the end (full denoise, recommended for the first stage). < s1_steps leaves "
                                "the latent noisy for the next stage (res_2m only)."}),
                 # Stage 2 - refine
-                "crop_bottom": ("INT", {"default": 0, "min": 0, "max": 96, "step": 2,
-                    "tooltip": "Crop N latent rows off the bottom of the FINAL executed stage to remove "
-                               "the boundary band the DiT re-forms on every denoise (1 latent row = 8 px "
-                               "at the final stage's resolution). 0 = off. Snapped to even (2x2 patch "
-                               "stride). Typical ~10-20 at final res; deeper S2/S3 sampling needs fewer."}),
-                "crop_overgen": ("BOOLEAN", {"default": True,
-                    "tooltip": "ON (recommended): the final stage makes disposable extra bottom rows "
-                               "(S1 generates taller; S2/S3 pad the upscaled latent) so the band forms "
-                               "in them and is trimmed - your target size/aspect is preserved and the "
-                               "real content is never stretched. OFF: trim the final latent directly "
-                               "(output ends up shorter by the crop)."}),
+                "s1_s2_upscale_vae": ("BOOLEAN", {"default": False,
+                    "tooltip": "S1->S2 jump: use the trained 2x VAE (decode-2x + re-encode = real detail) "
+                               "instead of bislerp. Forces a 2x linear step (4x area), OVERRIDING "
+                               "upscale_to_stage2. Requires upscale_vae connected. Separate from "
+                               "upscale_vae_mode because using the VAE this early is a specialist move - "
+                               "it injects detail right after composition and the re-encode softening "
+                               "gets refined away by S2/S3 (unlike at the final stage, where it looks soft)."}),
                 "upscale_to_stage2": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 8.0, "step": 0.5,
                     "tooltip": "S1->S2 AREA upscale factor (0 = stop after S1). This is MEGAPIXELS, "
                                "not linear: 2.0 = 2x the pixels ~= 1.41x per side; 4.0 = 2x per side. "
@@ -567,13 +617,6 @@ class EricKrea2MultistageUltra:
                                "both: s2-s3 (4x area) + final VAE 2x decode.\n"
                                "both with downsample: s2-s3 downsampled + final downsampled.\n"
                                "both with final decode downsample: s2-s3 (4x area) + final downsampled."}),
-                "s1_s2_upscale_vae": ("BOOLEAN", {"default": False,
-                    "tooltip": "S1->S2 jump: use the trained 2x VAE (decode-2x + re-encode = real detail) "
-                               "instead of bislerp. Forces a 2x linear step (4x area), OVERRIDING "
-                               "upscale_to_stage2. Requires upscale_vae connected. Separate from "
-                               "upscale_vae_mode because using the VAE this early is a specialist move - "
-                               "it injects detail right after composition and the re-encode softening "
-                               "gets refined away by S2/S3 (unlike at the final stage, where it looks soft)."}),
                 # Alternate decode VAE (optional) - swap grain/texture at decode.
                 "decode_vae": ("KREA2_DECODE_VAE", {
                     "tooltip": "Optional base Wan 2.1 (or other Wan-family) VAE for the 1x "
@@ -653,9 +696,20 @@ class EricKrea2MultistageUltra:
             kwargs["prompt_conditioning"] = {"embeds": new_embeds, "mask": pc.get("mask")}
             print(f"[EricKrea2-MS] cond_rebalance applied directly to precomputed prompt_conditioning "
                   f"{tuple(new_embeds.shape)}")
+        # Reference latents (opt-in edit pathway): wrap transformer.forward so packed
+        # reference tokens ride along at t=0 modulation (see _ref_latents.py). Popped
+        # here so _generate_inner's signature stays untouched; the wrap covers BOTH
+        # call paths (pipe(...) and _res_denoise_packed's direct transformer calls).
+        ref_bundle = kwargs.pop("ref_latents", None)
+        ref_orig = None
+        if isinstance(ref_bundle, dict) and ref_bundle.get("packed"):
+            from .._ref_latents import install_ref_latents
+            ref_orig = install_ref_latents(pipe, ref_bundle)
         try:
             return self._generate_inner(**kwargs)
         finally:
+            if ref_orig is not None:
+                pipe.transformer.forward = ref_orig
             if reb_orig is not None:
                 pipe.encode_prompt = reb_orig
             if lora_stack and any(e.get("ephemeral", True) for e in lora_stack):
@@ -749,6 +803,7 @@ class EricKrea2MultistageUltra:
                  upscale_to_stage3=2.0, s3_steps=20, s3_cfg=1.3, s3_start_step=9, s3_end_step=20,
                  s3_schedule="linear", s3_sampler="euler", s3_noise="white",
                  s1_eta=0.1, s2_eta=0.1, s3_eta=0.1, eta=None,
+                 cond_jitter=0.0, cond_jitter_seed=-1,
                  turbo_guidance="off",
                  upscale_vae=None, upscale_vae_mode="disabled", s1_s2_upscale_vae=False,
                  decode_vae=None, preview_stages=False, sigmas=None):
@@ -869,6 +924,29 @@ class EricKrea2MultistageUltra:
         final_downsample = _final_vae and _final_down
 
         device = getattr(pipe, "_execution_device", None) or "cuda"
+
+        # Conditioning jitter (opt-in): perturb the POSITIVE conditioning once, then
+        # thread it through the existing cond_override path so every stage uses the
+        # SAME jittered conditioning (per-stage jitter would make S2/S3 refine toward
+        # a different point than S1 composed). Encoding here goes through the (possibly
+        # rebalance-wrapped) encode_prompt, so the order is rebalance -> jitter.
+        if cond_jitter and float(cond_jitter) > 0:
+            _jseed = int(cond_jitter_seed)
+            if _jseed < 0:
+                _jseed = (int(seed) + 777) if int(seed) > 0 else int(
+                    torch.randint(0, 2**31 - 1, (1,)).item())
+            _jgen = torch.Generator(device=device).manual_seed(int(_jseed))
+            if _cond_override is None:
+                _je, _jm = pipe.encode_prompt(prompt=prompt, device=device,
+                                              num_images_per_prompt=1)
+            else:
+                _je, _jm = _cond_override
+                _je = _je.to(device)
+            _je = _jitter_embeds(_je, float(cond_jitter), _jgen)
+            _cond_override = (_je, _jm)
+            print(f"[EricKrea2-MS] cond_jitter: sigma={float(cond_jitter):.3f} x per-tap std, "
+                  f"seed={_jseed}, applied once to positive conditioning "
+                  f"{tuple(_je.shape)} (all stages)")
 
         # -- per-stage seeds --
         def _make_generator(s):

@@ -29,7 +29,7 @@ Repository = "https://github.com/EricRollei/Eric_Krea2"
 #  Set PublisherId to your registry handle before `comfy node publish`.
 # ─────────────────────────────────────────────────────────────────────────
 [tool.comfy]
-PublisherId = ""
+PublisherId = "ericrollei"
 DisplayName = "Eric_Krea2"
 Icon = ""
 

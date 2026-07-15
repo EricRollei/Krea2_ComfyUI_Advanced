@@ -21,6 +21,17 @@ from __future__ import annotations
 
 from .._upscale_vae import decode_latents_with_upscale_vae
 from .._latent_utils import standard_decode
+from .. import _settings
+
+
+def _comfy_vae_choices():
+    """ComfyUI models/vae dropdown choices (incl. extra_model_paths), or ['none']
+    if folder_paths isn't importable (standalone import)."""
+    try:
+        import folder_paths
+        return ["none"] + list(folder_paths.get_filename_list("vae"))
+    except Exception:
+        return ["none"]
 
 
 class EricKrea2DecodeVAELoader:
@@ -52,6 +63,17 @@ class EricKrea2DecodeVAELoader:
                 "dtype": (["float32", "bfloat16", "float16"], {
                     "default": "float32",
                     "tooltip": "float32 is safest for a clean decode; bf16/fp16 are lighter."}),
+                # New widgets appended at the END so old workflows' positional
+                # widgets_values arrays still line up (missing tail -> defaults).
+                "vae_name": (_comfy_vae_choices(), {"default": "none",
+                    "tooltip": "Pick a VAE from ComfyUI's models/vae folders (takes precedence "
+                               "over vae_source when not 'none'). Must be a Wan-2.1-family / "
+                               "Qwen-Image VAE - an SD/SDXL/FLUX VAE will fail to load as "
+                               "AutoencoderKLWan."}),
+                "decode_vae_preset": (_settings.list_preset_names("decode_vae"), {"default": "custom",
+                    "tooltip": "Load a saved decode-VAE recipe (source / dropdown / dtype) into the "
+                               "panel for this run. 'custom' = use the panel as-is. Use the \u2605 "
+                               "Save Preset button to add one; the list refreshes on graph reload."}),
             },
         }
 
@@ -60,16 +82,42 @@ class EricKrea2DecodeVAELoader:
     FUNCTION = "load"
     CATEGORY = "Eric/Krea2"
 
-    def load(self, vae_source, dtype="float32"):
+    def load(self, vae_source, dtype="float32", vae_name="none", decode_vae_preset="custom"):
         import os
         import torch
         from diffusers import AutoencoderKLWan
         import comfy.model_management as mm
 
+        # Headless / API-run fallback: apply a named preset over the panel values
+        # (the JS normally writes these into the visible widgets at edit time).
+        if decode_vae_preset and decode_vae_preset != "custom":
+            _vals = {"vae_source": vae_source, "dtype": dtype, "vae_name": vae_name}
+            n = _settings.apply_named_preset("decode_vae", decode_vae_preset, _vals,
+                                             valid_keys=set(_vals.keys()))
+            vae_source, dtype, vae_name = _vals["vae_source"], _vals["dtype"], _vals["vae_name"]
+            print(f"[EricKrea2] decode_vae_preset '{decode_vae_preset}': applied {n} field(s).")
+
         td = {"float32": torch.float32, "bfloat16": torch.bfloat16,
               "float16": torch.float16}.get(dtype, torch.float32)
         src = (vae_source or "").strip()
         device = mm.get_torch_device()
+
+        # The models/vae dropdown wins over the free-form source when a file is picked.
+        if vae_name and vae_name != "none":
+            try:
+                import folder_paths
+                resolved = folder_paths.get_full_path("vae", vae_name)
+            except Exception as e:
+                resolved = None
+                print(f"[EricKrea2] could not resolve vae_name '{vae_name}': {e}")
+            if resolved and os.path.isfile(resolved):
+                print(f"[EricKrea2] using models/vae pick '{vae_name}' -> {resolved}")
+                src = resolved
+            else:
+                raise FileNotFoundError(
+                    f"[EricKrea2] vae_name '{vae_name}' selected but not found in any "
+                    f"registered vae folder. Refresh the browser / restart ComfyUI if the "
+                    f"file was just added, or use vae_source instead.")
 
         # Wan 2.1 VAE config bundled with this package, so single-file loads never
         # need to reach HuggingFace for a config.json (the diffusers default points

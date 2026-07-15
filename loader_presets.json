@@ -24,5 +24,31 @@
       "keep_in_vram": true,
       "offload_vae": false
     }
+  },
+  "Kreamania bf16": {
+    "loader": {
+      "base_pipeline_path": "H:\\Training\\Krea-2-Turbo",
+      "transformer_path": "A:\\Models\\diffusion_models\\Krea2\\kreamania_variant4.safetensors",
+      "text_encoder_path": "A:\\Models\\text_encoders\\qwen3VLInstruct4bHeretic_v10.safetensors",
+      "vae_path": "A:\\Models\\vae\\wan_2.1_vae-HDR-Fell-dude.safetensors",
+      "precision": "bf16",
+      "attention_backend": "auto",
+      "device": "cuda",
+      "keep_in_vram": true,
+      "offload_vae": false
+    }
+  },
+  "JibMixV10": {
+    "loader": {
+      "base_pipeline_path": "H:\\Training\\Krea-2-Turbo",
+      "transformer_path": "A:\\Models\\diffusion_models\\Krea2\\jibMixKrea_v10JalapeO.safetensors",
+      "text_encoder_path": "A:\\Models\\text_encoders\\qwen3VLInstruct4bHeretic_v10.safetensors",
+      "vae_path": "A:\\Models\\vae\\wan_2.1_vae-HDR-Fell-dude.safetensors",
+      "precision": "bf16",
+      "attention_backend": "auto",
+      "device": "cuda",
+      "keep_in_vram": true,
+      "offload_vae": false
+    }
   }
 }
