@@ -21,8 +21,8 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/EricRollei/Eric_Krea2"
-"Bug Tracker" = "https://github.com/EricRollei/Eric_Krea2/issues"
+Repository = "https://github.com/EricRollei/Krea2_ComfyUI_Advanced"
+"Bug Tracker" = "https://github.com/EricRollei/Krea2_ComfyUI_Advanced/issues"
 
 # ─────────────────────────────────────────────────────────────────────────
 #  ComfyUI Registry metadata (https://registry.comfy.org)

@@ -9,9 +9,9 @@ This work is licensed under a modified Creative Commons Attribution-NonCommercia
 ### Attribution Requirements
 
 1. **Mandatory Credit**: You must give appropriate credit to Eric Hiss as the original author by:
-   - Including a link to the original repository (<https://github.com/EricRollei/Eric_Krea2>) in any documentation
+   - Including a link to the original repository (<https://github.com/EricRollei/Krea2_ComfyUI_Advanced>) in any documentation
    - Maintaining the original copyright and license notices in all copies or substantial portions of the software
-   - Including attribution comments in your code that clearly state "Based on work by Eric Hiss (<https://github.com/EricRollei/Eric_Krea2>)"
+   - Including attribution comments in your code that clearly state "Based on work by Eric Hiss (<https://github.com/EricRollei/Krea2_ComfyUI_Advanced>)"
 
 2. **Modification Notice**: If you modify the software, you must clearly indicate what changes were made and attribute the original work to Eric Hiss.
 
