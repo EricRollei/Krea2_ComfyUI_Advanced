@@ -109,6 +109,17 @@ diffusers/transformers build new enough to expose it.
   the faster `attention_backend` paths.
 - *Optional:* the spacepxl Wan 2× upscale VAE (auto-downloaded on first use).
 
+## Example workflow
+
+![Multi-purpose Eric_Krea2 workflow](workflows/example-workflow.png)
+
+A single, multi-purpose graph lives in [workflows/](workflows/). **Drag
+`example-workflow.png` onto the ComfyUI canvas** (the graph is embedded in the
+PNG metadata) to load the whole pipeline at once - loaders, txt2img, img2img,
+Vision Prompt, per-stage sampling, and the metadata-aware save. Flip parts on/off
+with group **bypass** (Ctrl+B) instead of juggling separate workflows. See
+[workflows/README.md](workflows/README.md) for the group-by-group breakdown.
+
 ## Nodes
 
 ### Core generation
@@ -120,11 +131,19 @@ diffusers/transformers build new enough to expose it.
 | **Eric Krea2 Multi-Stage Ultra (res)** | Up to 3-stage progressive high-res with the custom RES/DEIS samplers, per-stage schedules, img2img `init_latent`, an optional `ref_latents` edit input, and `width`/`height` overrides. Best on Raw. |
 | **Eric Krea2 Multi-Stage Ultra V2 (presets)** | Preset-driven variant of the Ultra node - serialises every widget (incl. `sigmas`, `width`/`height`) into one reproducible recipe. |
 
+![Loader group: Component Loader, Upscale/Decode VAE loaders, and the Multi-LoRA Stack](assets/Loader-group.png)
+
+*The loader group - the Component Loader (with `loader_preset`), the Upscale and Decode VAE loaders, and the growable Multi-LoRA Stack with per-stage strengths. Each carries its own ★ Save Preset button.*
+
 ### Sampling & scheduling
 
 | Node | Does |
 |------|------|
 | **Eric Krea2 Sigmas** | Per-stage schedule overrides (S1/S2/S3): curve, `detail_bias`, Beta α/β. Emits a `KREA2_SIGMAS` bundle the Ultra nodes fold in. |
+
+![Sigmas node with live per-stage sigma curves](assets/Krea2-sigmas.png)
+
+*The Sigmas node: per-stage curve / `detail_bias` / Beta α-β overrides with a live sigma preview per stage (solid = steps that run, ring = re-noise level, ghost = full schedule).*
 
 Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
 `deis_4m`. Schedules: `linear`, `balanced`, `karras`, `beta57`, `beta`,
@@ -161,6 +180,10 @@ Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
 | **Eric Krea2 Unload Models** | Free VRAM on demand. |
 | **Eric Krea2 Save Latent (debug)** | Save/inspect a packed latent for debugging. |
 
+![Merge Settings feeding a metadata-aware save node](assets/Image-save-with-settings-data.png)
+
+*Reproducibility: Merge Settings folds the loader + Ultra + LoRA + prompt recipes into one bundle that gets embedded in the saved PNG - readable back later via Settings from Image.*
+
 ### Prompting
 
 | Node | Does |
@@ -173,6 +196,10 @@ Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
 
 Each stage of the Multi-Stage Ultra node picks a **sampler** (the ODE solver) and a
 **schedule** (the sigma spacing) independently.
+
+![Sampling group: Sigmas node feeding the Multi-Stage Ultra V2 node](assets/Sampler_Group.png)
+
+*A full sampling group - the Sigmas node feeding Multi-Stage Ultra V2, with per-stage samplers/schedules, guidance, re-noise windows, and the on-node resolution-chain readout.*
 
 **Samplers**
 
@@ -258,6 +285,10 @@ more prone to overshoot on short or noisy-early-stop stages.
 
 ## img2img
 
+![img2img: Load Image feeding VAE Encode into the Ultra node's init latent](assets/image-to-image.png)
+
+*img2img (Part 1): a start image is VAE-encoded into the S1 `init_latent`. Denoise strength lives in the step window; the prompt still does the talking. Bypass the group for pure txt2img.*
+
 ```
 Load Image → Eric Krea2 VAE Encode → (init_latent) Multi-Stage Ultra
                      └→ Eric Krea2 Resolution (image) → width/height → Multi-Stage Ultra
@@ -269,6 +300,10 @@ not a separate float. Feed `width`/`height` from the Resolution node (or turn on
 `init_match_size`) to size Stage 1 to the source image.
 
 ## Vision Prompt (image-grounded conditioning)
+
+![Vision Encoder group: reference image plus text through the Qwen3-VL vision path](assets/Vision-Encoder.png)
+
+*Vision Prompt (Part 2): a reference image + a short instruction run through Krea2's own Qwen3-VL vision path → `KREA2_CONDITIONING`. Sets content/style; pairs with img2img for structure.*
 
 ```
 Load Image(s) -> Eric Krea2 Vision Prompt -> (prompt_conditioning) Multi-Stage Ultra
