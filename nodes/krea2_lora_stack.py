@@ -32,6 +32,7 @@ Author: Eric Hiss (GitHub: EricRollei)
 import os
 
 from .._lora_utils import get_lora_list, get_lora_full_path
+from .._trigger_words import get_trigger_words, merge_triggers_into_prompt
 from .krea2_lora import _sanitize_adapter_name, _stack_settings
 from .. import _settings
 
@@ -43,8 +44,10 @@ class EricKrea2MultiLoRA:
 
     CATEGORY = "Eric/Krea2"
     FUNCTION = "apply"
-    RETURN_TYPES = ("KREA2_PIPELINE", "STRING")
-    RETURN_NAMES = ("pipeline", "settings")
+    # trigger_words / prompt outputs appended at the END so existing links
+    # (by index) keep working in saved workflows.
+    RETURN_TYPES = ("KREA2_PIPELINE", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("pipeline", "settings", "trigger_words", "prompt")
 
     # Number of LoRA rows declared. The JS extension hides unused rows so this
     # can be generous without cluttering the graph.
@@ -83,9 +86,41 @@ class EricKrea2MultiLoRA:
             optional[f"strength_{i}s3"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 50000,
                 "step": 0.05,
                 "tooltip": f"Slot {i} weight during Stage-3 (final detail)."})
+        # Node-level widgets appended AFTER all slot rows (positional
+        # widgets_values safety; the row-hiding JS matches slot widgets by name
+        # and never touches these). 'prompt' is a socket (forceInput), so it
+        # does not occupy a widgets_values slot at all.
+        optional["stack_enabled"] = ("BOOLEAN", {"default": True,
+            "label_on": "on", "label_off": "off",
+            "tooltip": "Master switch for the WHOLE stack. OFF = pass the pipeline through "
+                       "untouched (no slot is queued, no triggers emitted) without clearing "
+                       "any slot settings."})
+        optional["fetch_triggers"] = ("BOOLEAN", {"default": True,
+            "tooltip": "Look up trigger words for every ENABLED slot (safetensors metadata / "
+                       "Civitai, cached locally in Eric_Krea2/data/lora_triggers.json - only "
+                       "the first lookup per file touches the network). Fills the "
+                       "trigger_words output (combined, de-duplicated, slot order)."})
+        optional["add_triggers"] = (["off", "prepend", "append"], {"default": "off",
+            "tooltip": "Merge the combined trigger words of all enabled slots into the prompt "
+                       "passthrough output. off = prompt passes through unchanged. Triggers "
+                       "already present in the prompt are not duplicated."})
+        optional["force_refetch"] = ("BOOLEAN", {"default": False,
+            "tooltip": "Bypass the local trigger cache and re-query Civitai for the enabled "
+                       "slots this run. Leave OFF normally."})
+        optional["prompt"] = ("STRING", {"default": "", "forceInput": True,
+            "tooltip": "Optional prompt passthrough. Connect your prompt here and take the "
+                       "'prompt' output onward; with add_triggers on, the enabled slots' "
+                       "trigger words are merged in."})
         return {"required": {"pipeline": ("KREA2_PIPELINE",)}, "optional": optional}
 
-    def apply(self, pipeline, ephemeral=True, lora_preset="custom", **kwargs):
+    def apply(self, pipeline, ephemeral=True, lora_preset="custom",
+              stack_enabled=True, fetch_triggers=True, add_triggers="off",
+              force_refetch=False, prompt="", **kwargs):
+        if not stack_enabled:
+            print("[EricKrea2-LoRA] Multi-LoRA stack is toggled OFF - passing pipeline through.")
+            return (pipeline, _stack_settings(pipeline.get("lora_stack", [])),
+                    "", prompt or "")
+
         # Headless / API-run fallback: apply a named preset to the slot values (the
         # JS normally writes these into the visible panel at edit time).
         if lora_preset and lora_preset != "custom":
@@ -103,6 +138,8 @@ class EricKrea2MultiLoRA:
         existing = {e["adapter_name"] for e in stack}
 
         added = 0
+        triggers = []          # combined across enabled slots, slot order, de-duped
+        _seen_trig = set()
         for i in range(1, self.MAX_SLOTS + 1):
             name = kwargs.get(f"lora_{i}", "none")
             if not name or name == "none":
@@ -141,11 +178,26 @@ class EricKrea2MultiLoRA:
             })
             added += 1
 
+            # Trigger words for this ENABLED slot (cached lookup; network only
+            # the first time a file is seen). Disabled/'none' slots never reach
+            # this point, so their triggers are never emitted.
+            if fetch_triggers:
+                try:
+                    for t in get_trigger_words(path, force=force_refetch):
+                        k = t.lower()
+                        if k not in _seen_trig:
+                            _seen_trig.add(k)
+                            triggers.append(t)
+                except Exception as e:
+                    print(f"[EricKrea2-LoRA] trigger lookup failed for slot {i} "
+                          f"(non-fatal): {e}")
+
         new_pipeline["lora_stack"] = stack
+        out_prompt = merge_triggers_into_prompt(prompt, triggers, add_triggers)
         print(f"[EricKrea2-LoRA] Multi-LoRA queued {added} adapter(s) "
               f"(ephemeral={ephemeral}); stack depth {len(stack)}. "
               "Realized at generation by the Multi-Stage Ultra node.")
-        return (new_pipeline, _stack_settings(stack))
+        return (new_pipeline, _stack_settings(stack), ", ".join(triggers), out_prompt)
 
 
 NODE_CLASS_MAPPINGS = {"EricKrea2MultiLoRA": EricKrea2MultiLoRA}

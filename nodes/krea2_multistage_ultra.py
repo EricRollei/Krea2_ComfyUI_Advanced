@@ -106,6 +106,26 @@ def _dims_from_ratio_mp(ratio_key: str, megapixels: float):
     return _round16(w), _round16(h)
 
 
+def _resolve_s1_dims(aspect_ratio, s1_megapixels, width, height, init_latent, init_match_size,
+                     verbose: bool = True):
+    """Resolve Stage 1's target (w, h), same precedence used inside ``_generate_inner``:
+    aspect_ratio+s1_megapixels < explicit width/height < init_latent (when init_match_size).
+    Factored out so ``generate()`` can resolve it early (before the heavy denoise loop) to
+    size-match ``ref_latents``."""
+    s1_w, s1_h = _dims_from_ratio_mp(aspect_ratio, s1_megapixels)
+    if int(width) > 0 and int(height) > 0:
+        s1_w, s1_h = _round16(int(width)), _round16(int(height))
+        if verbose:
+            print(f"[EricKrea2-MS] Stage 1 size overridden by width/height inputs -> {s1_w}x{s1_h} "
+                  "(aspect_ratio + s1_megapixels ignored)")
+    if init_latent is not None and init_match_size:
+        s1_w = _round16(int(init_latent.get("width", s1_w)))
+        s1_h = _round16(int(init_latent.get("height", s1_h)))
+        if verbose:
+            print(f"[EricKrea2-MS] img2img: Stage 1 size matched to init latent -> {s1_w}x{s1_h}")
+    return s1_w, s1_h
+
+
 def _scaled_dims(w: int, h: int, area_factor: float):
     """New WxH for an area scale factor, rounded to multiples of 16 (keeps aspect)."""
     s = math.sqrt(max(area_factor, 1e-6))
@@ -400,8 +420,18 @@ class EricKrea2MultistageUltra:
                                "VAE-encoded reference tokens to the image sequence at t=0 modulation "
                                "(ai-toolkit 'index_timestep_zero' edit method). ONLY does something useful "
                                "with an edit-trained LoRA loaded (e.g. the Krea 2 Style Reference LoRA at "
-                               "1.0); the base model ignores what it can't read. Intended for Turbo at "
-                               "guidance 0 - with CFG on, refs condition both passes and partially cancel."}),
+                               "~0.4-0.5 strength - 1.0 is reported to break/fragment the image); the base "
+                               "model ignores what it can't read. Intended for Turbo at guidance 0 - with "
+                               "CFG on, refs condition both passes and partially cancel."}),
+                "ref_match_size": ("BOOLEAN", {"default": True,
+                    "tooltip": "Rescale ref_latents (in latent space, no re-encode) to this run's resolved "
+                               "Stage 1 size before denoising. Reference tokens share the live image's "
+                               "(0,0)-origin rotary grid (offset only on the frame axis), so a size mismatch "
+                               "between the reference's own grid and Stage 1's grid biases attention toward "
+                               "the overlapping corner - looks like the reference pasted in a shrunken corner "
+                               "at small Stage 1 sizes, a fragmented partial copy at large ones. ON (default) "
+                               "fixes this automatically, mirroring init_match_size. OFF = use the reference "
+                               "at whatever size it was encoded at in Eric Krea2 Reference Latents."}),
                 "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "cond_preset": (["custom"] + sorted(cls._load_cond_presets().keys()), {"default": "custom",
                     "tooltip": "Preset library of rebalance profiles (from cond_presets.json). 'custom' "
@@ -701,9 +731,16 @@ class EricKrea2MultistageUltra:
         # here so _generate_inner's signature stays untouched; the wrap covers BOTH
         # call paths (pipe(...) and _res_denoise_packed's direct transformer calls).
         ref_bundle = kwargs.pop("ref_latents", None)
+        ref_match_size = kwargs.pop("ref_match_size", True)
         ref_orig = None
         if isinstance(ref_bundle, dict) and ref_bundle.get("packed"):
-            from .._ref_latents import install_ref_latents
+            from .._ref_latents import install_ref_latents, resize_ref_bundle_to_dims
+            if ref_match_size:
+                s1_w, s1_h = _resolve_s1_dims(
+                    kwargs.get("aspect_ratio", "5:4 landscape"), kwargs.get("s1_megapixels", 3.0),
+                    kwargs.get("width", 0), kwargs.get("height", 0), kwargs.get("init_latent"),
+                    kwargs.get("init_match_size", True), verbose=False)
+                ref_bundle = resize_ref_bundle_to_dims(pipe, ref_bundle, s1_w, s1_h)
             ref_orig = install_ref_latents(pipe, ref_bundle)
         try:
             return self._generate_inner(**kwargs)
@@ -867,15 +904,8 @@ class EricKrea2MultistageUltra:
                   "produced color-swirl artifacts instead of a composition bias). Has NO effect "
                   "with eta=0 or sampler=euler (no SDE churn hook in either case).")
 
-        s1_w, s1_h = _dims_from_ratio_mp(aspect_ratio, s1_megapixels)
-        if int(width) > 0 and int(height) > 0:
-            s1_w, s1_h = _round16(int(width)), _round16(int(height))
-            print(f"[EricKrea2-MS] Stage 1 size overridden by width/height inputs -> {s1_w}x{s1_h} "
-                  "(aspect_ratio + s1_megapixels ignored)")
-        if init_latent is not None and init_match_size:
-            s1_w = _round16(int(init_latent.get("width", s1_w)))
-            s1_h = _round16(int(init_latent.get("height", s1_h)))
-            print(f"[EricKrea2-MS] img2img: Stage 1 size matched to init latent -> {s1_w}x{s1_h}")
+        s1_w, s1_h = _resolve_s1_dims(aspect_ratio, s1_megapixels, width, height, init_latent,
+                                      init_match_size)
         # bottom-band crop. overgen grows S1 by a REAL guard band (extra rows the model generates
         # into), carries it through both upscales, and trims the accumulated margin off the final
         # stage - so the boundary band forms in the discarded margin at EVERY stage and the target

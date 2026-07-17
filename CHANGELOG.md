@@ -3,6 +3,32 @@
 All notable changes to Eric_Krea2 are documented here. Format loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.2.0
+
+### Added - automatic LoRA trigger words
+- **New `_trigger_words.py` + `data/lora_triggers.json` cache** - looks up a
+  LoRA's trigger words from safetensors metadata and Civitai, cached locally so
+  only the first sighting of a file touches the network.
+- **`Eric Krea2 LoRA` / `LoRA Stack` nodes** gain `trigger_words` and `prompt`
+  outputs (appended at the end so saved workflows keep working) plus
+  `fetch_triggers`, `add_triggers` (off/prepend/append), and `force_refetch`
+  controls. With `add_triggers` on, found triggers are merged into the prompt
+  passthrough without duplicating triggers already present.
+
+### Fixed - multi-LoRA stacking
+- **Adapter-collision false negative**: the live-layer count is now filtered to
+  the adapter being loaded. Previously the unfiltered total did not grow when a
+  2nd+ adapter landed on modules an earlier adapter already covered, which
+  false-negatived the load and deleted a correctly-loaded adapter.
+- **PEFT-wrap tolerant lookups**: once any adapter wraps a Linear, PEFT renames
+  its `X.weight` param to `X.base_layer.weight`. Direct loaders and the Krea->
+  diffusers converter now fall back to the `base_layer` key, so LoRAs beyond the
+  first in a stack validate and apply.
+- **Tensor-truthiness bug** in the direct-load fallback: `params.get(a) or
+  params.get(b)` on a present tensor raised "Boolean value of Tensor ...
+  ambiguous", making the whole fallback path unreachable. Replaced with explicit
+  `None` checks.
+
 ## Unreleased
 
 ### Added - reference-latent edit pathway (EXPERIMENTAL, untested on live model)

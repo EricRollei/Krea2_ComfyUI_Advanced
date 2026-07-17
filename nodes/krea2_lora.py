@@ -35,6 +35,7 @@ from .._lora_utils import (
     get_lora_list, get_lora_full_path,
     _diagnose_lora_compatibility, unload_all_loras,
 )
+from .._trigger_words import get_trigger_words, merge_triggers_into_prompt
 
 
 def _sanitize_adapter_name(lora_path: str) -> str:
@@ -67,8 +68,10 @@ class EricKrea2ApplyLoRA:
 
     CATEGORY = "Eric/Krea2"
     FUNCTION = "apply_lora"
-    RETURN_TYPES = ("KREA2_PIPELINE", "STRING")
-    RETURN_NAMES = ("pipeline", "settings")
+    # trigger_words / prompt outputs appended at the END so existing links
+    # (by index) keep working in saved workflows.
+    RETURN_TYPES = ("KREA2_PIPELINE", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("pipeline", "settings", "trigger_words", "prompt")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -110,13 +113,35 @@ class EricKrea2ApplyLoRA:
                                "toggles) into the panel for this run. 'custom' = use the panel as-is. "
                                "Use the \u2605 Save Preset button to add one; the list refreshes on "
                                "graph reload."}),
+                # Trigger-word widgets appended at the END (positional widgets_values
+                # safety, same convention as 'enabled' above). 'prompt' is a socket
+                # (forceInput), so it does not occupy a widgets_values slot at all.
+                "fetch_triggers": ("BOOLEAN", {"default": True,
+                    "tooltip": "Look up this LoRA's trigger words (safetensors metadata / Civitai, "
+                               "cached locally in Eric_Krea2/data/lora_triggers.json - only the first "
+                               "lookup per file touches the network). Fills the trigger_words output."}),
+                "add_triggers": (["off", "prepend", "append"], {"default": "off",
+                    "tooltip": "Merge the found trigger words into the prompt passthrough output. "
+                               "off = prompt passes through unchanged (use the trigger_words output "
+                               "manually). Triggers already present in the prompt are not duplicated."}),
+                "force_refetch": ("BOOLEAN", {"default": False,
+                    "tooltip": "Bypass the local trigger cache and re-query Civitai for this LoRA "
+                               "(use if triggers were updated on Civitai or a lookup failed). "
+                               "Leave OFF normally."}),
+                "prompt": ("STRING", {"default": "", "forceInput": True,
+                    "tooltip": "Optional prompt passthrough. Connect your prompt here and take the "
+                               "'prompt' output onward; with add_triggers on, trigger words are "
+                               "merged in. Without a connection the prompt output is just the "
+                               "triggers (or empty)."}),
             },
         }
 
     def apply_lora(self, pipeline, lora_name, strength=1.0,
                    per_stage_weights=False, weight_s1=1.0, weight_s2=1.0, weight_s3=1.0,
                    ephemeral=True, lora_path_override="", enabled=True,
-                   apply_lora_preset="custom"):
+                   apply_lora_preset="custom",
+                   fetch_triggers=True, add_triggers="off", force_refetch=False,
+                   prompt=""):
         # Headless / API-run fallback: apply a named preset over the panel values
         # (the JS normally writes these into the visible widgets at edit time).
         if apply_lora_preset and apply_lora_preset != "custom":
@@ -126,19 +151,24 @@ class EricKrea2ApplyLoRA:
                 "weight_s1": weight_s1, "weight_s2": weight_s2, "weight_s3": weight_s3,
                 "ephemeral": ephemeral, "lora_path_override": lora_path_override,
                 "enabled": enabled,
+                "fetch_triggers": fetch_triggers, "add_triggers": add_triggers,
+                "force_refetch": force_refetch,
             }
             n = _settings.apply_named_preset("apply_lora", apply_lora_preset, _vals,
                                              valid_keys=set(_vals.keys()))
             (lora_name, strength, per_stage_weights, weight_s1, weight_s2, weight_s3,
-             ephemeral, lora_path_override, enabled) = (
+             ephemeral, lora_path_override, enabled,
+             fetch_triggers, add_triggers, force_refetch) = (
                 _vals["lora_name"], _vals["strength"], _vals["per_stage_weights"],
                 _vals["weight_s1"], _vals["weight_s2"], _vals["weight_s3"],
-                _vals["ephemeral"], _vals["lora_path_override"], _vals["enabled"])
+                _vals["ephemeral"], _vals["lora_path_override"], _vals["enabled"],
+                _vals["fetch_triggers"], _vals["add_triggers"], _vals["force_refetch"])
             print(f"[EricKrea2-LoRA] apply_lora_preset '{apply_lora_preset}': applied {n} field(s).")
 
         if not enabled:
             print("[EricKrea2-LoRA] Apply LoRA is toggled OFF - passing pipeline through.")
-            return (pipeline, _stack_settings(pipeline.get("lora_stack", [])))
+            return (pipeline, _stack_settings(pipeline.get("lora_stack", [])),
+                    "", prompt or "")
 
         # Resolve path
         if lora_path_override and lora_path_override.strip():
@@ -146,8 +176,9 @@ class EricKrea2ApplyLoRA:
             if not os.path.exists(lora_path):
                 raise ValueError(f"LoRA file not found: {lora_path}")
         else:
-            if lora_name == "none" or not lora_name:
-                return (pipeline, _stack_settings(pipeline.get("lora_stack", [])))   # pass through
+            if lora_name == "none" or not lora_name:   # pass through
+                return (pipeline, _stack_settings(pipeline.get("lora_stack", [])),
+                        "", prompt or "")
             lora_path = get_lora_full_path(lora_name)
             if lora_path is None:
                 raise ValueError(f"LoRA file not found: {lora_name}")
@@ -181,12 +212,21 @@ class EricKrea2ApplyLoRA:
         })
         new_pipeline["lora_stack"] = stack
 
+        # Trigger words (cached lookup; network only on first sight of a file).
+        triggers = []
+        if fetch_triggers:
+            try:
+                triggers = get_trigger_words(lora_path, force=force_refetch)
+            except Exception as e:
+                print(f"[EricKrea2-LoRA] trigger lookup failed (non-fatal): {e}")
+        out_prompt = merge_triggers_into_prompt(prompt, triggers, add_triggers)
+
         wtxt = (f"all={strength}" if not per_stage_weights
                 else f"S1={weight_s1}, S2={weight_s2}, S3={weight_s3}")
         print(f"[EricKrea2-LoRA] queued '{os.path.basename(lora_path)}' as '{adapter_name}' "
               f"({wtxt}, ephemeral={ephemeral}); stack depth {len(stack)}. "
               "Realized at generation by the Multi-Stage Ultra node.")
-        return (new_pipeline, _stack_settings(stack))
+        return (new_pipeline, _stack_settings(stack), ", ".join(triggers), out_prompt)
 
 
 # =======================================================================

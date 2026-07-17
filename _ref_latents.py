@@ -53,36 +53,49 @@ import torch.nn.functional as F
 
 # ── reference bundle preparation (encode side) ──────────────────────────────
 
-def prepare_ref_bundle(pipe, images, max_megapixels: float = 1.0, encode_vae=None):
+def prepare_ref_bundle(pipe, images, max_megapixels: float = 1.0, encode_vae=None,
+                       target_pixels: int | None = None):
     """ComfyUI IMAGEs -> packed, normalized reference latents + rotary grids.
 
     images: list of ComfyUI IMAGE tensors (B, H, W, C in 0..1); frame 0 of each
-    batch is used. Each is downscaled (never upscaled) to fit ``max_megapixels``,
-    then encoded via ``_latent_utils.standard_encode`` (deterministic dist.mode,
-    (raw - mean) / std normalization, flow-pack) - byte-identical latent space to
-    what Generate/Multi-Stage step through. standard_encode snaps dims to /16
-    (vae 8x * patch 2), matching ai-toolkit's edit-training snap.
+    batch is used. Encoded via ``_latent_utils.standard_encode`` (deterministic
+    dist.mode, (raw - mean) / std normalization, flow-pack) - byte-identical
+    latent space to what Generate/Multi-Stage step through. standard_encode
+    snaps dims to /16 (vae 8x * patch 2), matching ai-toolkit's edit-training
+    snap.
 
-    Returns {"packed": [(1, seq_i, C) cpu fp32 ...], "grids": [(gh, gw) ...],
-             "sizes": [(h, w) ...]}.
+    Sizing has two modes, mirroring ai-toolkit's ``_ref_target_pixels`` /
+    ``match_target_res``:
+      * ``target_pixels`` given (>0): MATCH mode - scale the reference's area
+        to this pixel budget (up or down, aspect preserved). Use this to align
+        the reference to the SAME token-grid scale as the actual generation
+        (wire the Ultra node's target width*height in). The reference tokens
+        share the live image's (0,0)-origin rotary grid (offset only on axis
+        0), so a size mismatch between ref grid and live grid biases the
+        model's correspondence toward the overlapping corner - the "reference
+        pasted in a shrunken corner" failure mode.
+      * ``target_pixels`` omitted/<=0: CAP mode (previous behavior) - downscale
+        (never upscale) to fit ``max_megapixels``, independent of generation size.
     """
     from ._latent_utils import standard_encode
 
     packed_list, grids, sizes = [], [], []
-    cap_px = float(max_megapixels) * 1_000_000.0
+    match_mode = bool(target_pixels and target_pixels > 0)
+    cap_px = float(target_pixels) if match_mode else float(max_megapixels) * 1_000_000.0
     for idx, image in enumerate(images):
         if image is None:
             continue
         img = image[:1]  # first frame of the batch
         h, w = int(img.shape[1]), int(img.shape[2])
-        if h * w > cap_px:
+        needs_resize = (h * w > cap_px) if not match_mode else (h * w != cap_px)
+        if needs_resize:
             scale = (cap_px / (h * w)) ** 0.5
             nh, nw = max(16, int(round(h * scale))), max(16, int(round(w * scale)))
             img = torch.nn.functional.interpolate(
                 img.permute(0, 3, 1, 2), size=(nh, nw), mode="bilinear",
                 align_corners=False).permute(0, 2, 3, 1)
-            print(f"[EricKrea2-Ref] reference {idx + 1}: downscaled {w}x{h} -> {nw}x{nh} "
-                  f"(cap {max_megapixels:.2f} MP)")
+            reason = "matched to target res" if match_mode else f"downscaled (cap {max_megapixels:.2f} MP)"
+            print(f"[EricKrea2-Ref] reference {idx + 1}: {w}x{h} -> {nw}x{nh} ({reason})")
         packed, tgt_h, tgt_w = standard_encode(pipe, img, encode_vae=encode_vae)
         p = pipe.patch_size
         gh = (tgt_h // pipe.vae_scale_factor) // p
@@ -93,6 +106,53 @@ def prepare_ref_bundle(pipe, images, max_megapixels: float = 1.0, encode_vae=Non
         print(f"[EricKrea2-Ref] reference {idx + 1}: {tgt_w}x{tgt_h}px -> grid {gh}x{gw} "
               f"({gh * gw} tokens)")
     return {"packed": packed_list, "grids": grids, "sizes": sizes}
+
+
+def resize_ref_bundle_to_dims(pipe, bundle, target_w: int, target_h: int):
+    """Rescale an already-encoded reference bundle in TOKEN space (no VAE
+    re-encode) so each reference's rotary grid matches ``target_w``x
+    ``target_h`` - the run's resolved Stage 1 size. Called automatically by the
+    Ultra node's ``ref_match_size`` toggle right before ``install_ref_latents``,
+    so the Reference Latents node itself needs no knowledge of the eventual
+    generation size.
+
+    Mirrors ai-toolkit's ``match_target_res``: reference tokens share the live
+    image's (0,0)-origin rotary grid (offset only on the frame axis), so a size
+    mismatch between the reference's own grid and the live grid biases
+    attention toward the overlapping corner (the "pasted in a shrunken corner"
+    / fragmented-copy failure mode).
+
+    Each packed token is a merged 2x2 VAE-patch cell (see ``_pack_latents`` in
+    ``_latent_utils.py``); bilinear-resizing the (gh, gw) token grid is
+    equivalent to resizing the underlying continuous latent field at the
+    patch-token resolution, so no unpacking of the internal channel layout is
+    needed - only the H/W arrangement changes. Returns a NEW bundle dict
+    (does not mutate the input); no-op if every reference's grid already
+    matches the target.
+    """
+    p = pipe.patch_size
+    tgh = max(1, (int(target_h) // pipe.vae_scale_factor) // p)
+    tgw = max(1, (int(target_w) // pipe.vae_scale_factor) // p)
+    packed_list = bundle.get("packed", [])
+    grids = list(bundle.get("grids", []))
+    if not packed_list or all(g == (tgh, tgw) for g in grids):
+        return bundle
+    new_packed, new_grids, new_sizes = [], [], []
+    for idx, (packed, (gh, gw)) in enumerate(zip(packed_list, grids)):
+        if (gh, gw) == (tgh, tgw):
+            new_packed.append(packed)
+            new_grids.append((gh, gw))
+        else:
+            c = packed.shape[-1]
+            grid = packed.reshape(1, gh, gw, c).permute(0, 3, 1, 2)      # (1, C, gh, gw)
+            grid = F.interpolate(grid.float(), size=(tgh, tgw), mode="bilinear", align_corners=False)
+            resized = grid.permute(0, 2, 3, 1).reshape(1, tgh * tgw, c).to(packed.dtype)
+            new_packed.append(resized)
+            new_grids.append((tgh, tgw))
+            print(f"[EricKrea2-Ref] ref_match_size: reference {idx + 1} grid {gh}x{gw} -> {tgh}x{tgw} "
+                  f"tokens (target {target_w}x{target_h})")
+        new_sizes.append((tgh * pipe.vae_scale_factor * p, tgw * pipe.vae_scale_factor * p))
+    return {"packed": new_packed, "grids": new_grids, "sizes": new_sizes}
 
 
 # ── transformer forward wrapper (denoise side) ──────────────────────────────

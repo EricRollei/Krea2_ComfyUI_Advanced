@@ -547,6 +547,9 @@ def _load_loha_adapter_direct(pipe, state_dict: dict, adapter_name: str,
 
         target_key = mod_path + ".weight"
         if target_key not in model_sd:
+            # PEFT-wrapped module (another adapter targets it already).
+            target_key = mod_path + ".base_layer.weight"
+        if target_key not in model_sd:
             target_key = mod_path
         if target_key not in model_sd:
             skipped += 1
@@ -677,9 +680,12 @@ def _load_lora_adapter(pipe, state_dict: dict, adapter_name: str,
     transformer = getattr(pipe, "transformer", None)
     # ── Try 1: Pipeline LoRA loading with normalised keys ────────────
     try:
-        before = _live_lora_layer_count(transformer)
+        # Count filtered to THIS adapter: the unfiltered total does not grow when
+        # a 2nd+ adapter lands on modules an earlier adapter already covers, which
+        # false-negatived here and deleted a correctly-loaded adapter (2026-07-17).
+        before = _live_lora_layer_count(transformer, adapter_name)
         pipe.load_lora_weights(state_dict, adapter_name=adapter_name)
-        if _live_lora_layer_count(transformer) > before:
+        if _live_lora_layer_count(transformer, adapter_name) > before:
             print(f"{log_prefix} LoRA loaded via pipeline with normalised keys")
             return
         # Silent no-op: diffusers matched 0 modules (only warned). Clean up the
@@ -779,10 +785,16 @@ def _load_lora_adapter_direct(pipe, state_dict: dict, adapter_name: str,
     applied = 0
     skipped = 0
     for mod_path, params in modules.items():
-        lora_A = params.get("lora_A.weight") or params.get(
-            "lora_A.default.weight")
-        lora_B = params.get("lora_B.weight") or params.get(
-            "lora_B.default.weight")
+        # Explicit None checks: `x or y` on a Tensor calls bool(tensor) and
+        # raises "Boolean value of Tensor with more than one value is
+        # ambiguous" whenever the first key EXISTS - which made this whole
+        # fallback path unreachable (bug found 2026-07-17).
+        lora_A = params.get("lora_A.weight")
+        if lora_A is None:
+            lora_A = params.get("lora_A.default.weight")
+        lora_B = params.get("lora_B.weight")
+        if lora_B is None:
+            lora_B = params.get("lora_B.default.weight")
         if lora_A is None or lora_B is None:
             skipped += 1
             continue
@@ -799,6 +811,9 @@ def _load_lora_adapter_direct(pipe, state_dict: dict, adapter_name: str,
         delta = (lora_B.float() @ lora_A.float()) * scale
 
         target_key = mod_path + ".weight"
+        if target_key not in model_sd:
+            # PEFT-wrapped module (another adapter targets it already).
+            target_key = mod_path + ".base_layer.weight"
         if target_key not in model_sd:
             target_key = mod_path
         if target_key not in model_sd:
@@ -925,6 +940,19 @@ def _prod(shape) -> int:
     for d in shape:
         n *= int(d)
     return n
+
+
+def _param_shape_wrapped(param_shapes, diff_mod, suffix):
+    """Shape of ``<diff_mod>.<suffix>`` from a named_parameters() snapshot,
+    tolerant of PEFT wrapping: once ANY adapter targets a Linear, PEFT renames
+    its parameter ``X.weight`` -> ``X.base_layer.weight``. Without this
+    fallback the converter false-negatives every module that an
+    earlier-loaded adapter already covers, so only the FIRST LoRA in a stack
+    ever validates (bug found 2026-07-17)."""
+    shp = param_shapes.get(f"{diff_mod}.{suffix}")
+    if shp is None:
+        shp = param_shapes.get(f"{diff_mod}.base_layer.{suffix}")
+    return shp
 
 
 def _map_krea_module(tok: str):
@@ -1055,7 +1083,8 @@ def _convert_krea_lora_to_diffusers(state_dict, model=None, log_prefix="[LoRA]")
                 and down.ndim == 2 and up.ndim == 2):
             ok = True
             if param_shapes:
-                shp = param_shapes.get(f"{diff_mod}.weight")
+                # PEFT-wrap tolerant lookup (see _param_shape_wrapped).
+                shp = _param_shape_wrapped(param_shapes, diff_mod, "weight")
                 if shp is None:
                     unmapped.append(f"{tok}->{diff_mod}(missing)")
                     ok = False
@@ -1077,7 +1106,7 @@ def _convert_krea_lora_to_diffusers(state_dict, model=None, log_prefix="[LoRA]")
         # (2) Full-weight / bias deltas (.diff / .diff_b) ------------------
         wdelta = g.get("diff")
         if wdelta is not None:
-            shp = param_shapes.get(f"{diff_mod}.weight") if param_shapes else None
+            shp = _param_shape_wrapped(param_shapes, diff_mod, "weight") if param_shapes else None
             if shp is None or tuple(wdelta.shape) == shp or wdelta.numel() == _prod(shp):
                 direct.setdefault(diff_mod, {})["weight"] = wdelta
                 mapped_this = True
@@ -1086,7 +1115,7 @@ def _convert_krea_lora_to_diffusers(state_dict, model=None, log_prefix="[LoRA]")
                       f"({tuple(wdelta.shape)} vs {shp}); skipped")
         bdelta = g.get("diff_b")
         if bdelta is not None:
-            shp = param_shapes.get(f"{diff_mod}.bias") if param_shapes else None
+            shp = _param_shape_wrapped(param_shapes, diff_mod, "bias") if param_shapes else None
             if shp is None or tuple(bdelta.shape) == shp:
                 direct.setdefault(diff_mod, {})["bias"] = bdelta
                 mapped_this = True
@@ -1219,9 +1248,10 @@ def load_lora_with_key_fix(pipe, lora_path: str, adapter_name: str,
     # ── Fast path: try standard loading ──────────────────────────────
     transformer = getattr(pipe, "transformer", None)
     try:
-        before = _live_lora_layer_count(transformer)
+        # Filtered count: see note in _load_lora_adapter (adapter-collision fix).
+        before = _live_lora_layer_count(transformer, adapter_name)
         pipe.load_lora_weights(lora_path, adapter_name=adapter_name)
-        if _live_lora_layer_count(transformer) > before:
+        if _live_lora_layer_count(transformer, adapter_name) > before:
             return   # genuinely applied to the transformer
         # diffusers matched 0 keys and only WARNED (no exception). Remove the
         # phantom adapter and fall through to manual load + format detection.
@@ -1257,14 +1287,15 @@ def load_lora_with_key_fix(pipe, lora_path: str, adapter_name: str,
               f"module(s) [{', '.join(kinds)}] to diffusers naming")
         loaded_any = False
         if converted:
-            before = _live_lora_layer_count(transformer)
+            # Filtered count: see note in _load_lora_adapter (adapter-collision fix).
+            before = _live_lora_layer_count(transformer, adapter_name)
             try:
                 pipe.load_lora_weights(converted, adapter_name=adapter_name)
             except (ValueError, RuntimeError) as e:
                 print(f"{log_prefix} converted Krea LoRA pipeline load failed: "
                       f"{str(e)[:160]}")
             else:
-                if _live_lora_layer_count(transformer) > before:
+                if _live_lora_layer_count(transformer, adapter_name) > before:
                     loaded_any = True
                 else:
                     print(f"{log_prefix} converted Krea LoRA matched 0 modules")
@@ -1428,6 +1459,22 @@ def _diagnose_lora_compatibility(lora_path: str, transformer) -> str:
 #     on cancel/error). Net: adapters exist only during the generation call, so
 #     there are no stale or orphaned adapters across runs/workflows.
 
+def _alt_param_keys(tkey: str):
+    """Alternate names the same underlying parameter may carry, depending on
+    whether PEFT wrapped its module between load time and now:
+    ``X.weight`` <-> ``X.base_layer.weight`` (and likewise ``.bias``). Backup
+    keys are recorded at LOAD time, so a module wrapped (or unwrapped)
+    afterwards makes the recorded key stale (bug found 2026-07-17)."""
+    alts = []
+    if ".base_layer." in tkey:
+        alts.append(tkey.replace(".base_layer.", "."))
+    else:
+        for suffix in (".weight", ".bias"):
+            if tkey.endswith(suffix):
+                alts.append(tkey[: -len(suffix)] + ".base_layer" + suffix)
+    return alts
+
+
 def unload_all_loras(pipe, log_prefix="[EricKrea2-LoRA]"):
     """Remove all LoRA effects from the pipeline/transformer.
 
@@ -1448,15 +1495,37 @@ def unload_all_loras(pipe, log_prefix="[EricKrea2-LoRA]"):
             params = dict(transformer.named_parameters())
             for attr in backup_attrs:
                 backup = getattr(transformer, attr, None) or {}
+                missed = {}
                 for tkey, orig in backup.items():
                     p = params.get(tkey)
+                    if p is None:
+                        # Key recorded before/after PEFT wrapped the module;
+                        # try the other naming of the same parameter.
+                        for alt in _alt_param_keys(tkey):
+                            p = params.get(alt)
+                            if p is not None:
+                                break
                     if p is not None:
                         p.data.copy_(orig.to(dtype=p.dtype, device=p.device))
                         restored += 1
-                try:
-                    delattr(transformer, attr)
-                except Exception:
-                    pass
+                    else:
+                        missed[tkey] = orig
+                if missed:
+                    # NEVER discard an unrestored backup: it is the only copy
+                    # of the pristine weights. Keep it so a later unload (after
+                    # PEFT unwrapping, or a retry) can still restore, and shout
+                    # so the leak is visible instead of silent.
+                    setattr(transformer, attr, missed)
+                    print(f"{log_prefix} WARNING: {len(missed)} direct-merged "
+                          f"param(s) from adapter '{attr[len('_lora_backup_'):]}' "
+                          "could not be restored (parameter renamed?) - backup "
+                          "KEPT, deltas may still be baked in. Sample: "
+                          f"{sorted(missed)[:3]}")
+                else:
+                    try:
+                        delattr(transformer, attr)
+                    except Exception:
+                        pass
         # Drop direct-merge markers so peft_config reflects reality.
         peft_cfg = getattr(transformer, "peft_config", None)
         if isinstance(peft_cfg, dict):
@@ -1596,6 +1665,30 @@ def realize_lora_stack(pipe, stack, log_prefix="[EricKrea2-LoRA]"):
     return registered
 
 
+def _set_adapter_scale_direct(transformer, adapter_name, weight,
+                              log_prefix="[EricKrea2-LoRA]"):
+    """Directly set a PEFT adapter's scale on every layer carrying it.
+
+    Fallback for adapters diffusers' ``pipe.set_adapters()`` doesn't recognise
+    (e.g. loaded via raw PEFT injection rather than the pipeline loader).
+    Uses the layer's ``set_scale`` so the alpha/r base factor is preserved.
+    Returns the number of layers updated."""
+    n = 0
+    if transformer is None:
+        return 0
+    for module in transformer.modules():
+        scaling = getattr(module, "scaling", None)
+        if not isinstance(scaling, dict) or adapter_name not in scaling:
+            continue
+        try:
+            if hasattr(module, "set_scale"):
+                module.set_scale(adapter_name, float(weight))
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
 def set_stack_stage_weights(pipe, stack, registered, stage_idx, log_prefix="[EricKrea2-LoRA]"):
     """Set adapter scales for stage_idx (1/2/3) from each entry's per-stage weight."""
     if not registered:
@@ -1613,5 +1706,42 @@ def set_stack_stage_weights(pipe, stack, registered, stage_idx, log_prefix="[Eri
         pipe.set_adapters(names, weights)
         print(f"{log_prefix} stage {stage_idx} weights: " +
               ", ".join(f"{n}={w:.2f}" for n, w in zip(names, weights)))
+        return
     except Exception as e:
-        print(f"{log_prefix} set_adapters (stage {stage_idx}) note: {e}")
+        # One unrecognised adapter name must not silently kill per-stage scaling
+        # for the WHOLE stack (set_adapters is all-or-nothing). Split into the
+        # names diffusers knows (batch retry, preserves activation semantics)
+        # and the rest (direct per-layer set_scale on the transformer).
+        print(f"{log_prefix} set_adapters (stage {stage_idx}) batch failed: "
+              f"{str(e)[:120]} - splitting known/unknown adapters...")
+    transformer = getattr(pipe, "transformer", None)
+    known = None
+    try:
+        listed = pipe.get_list_adapters()   # {component: [adapter names]}
+        known = set()
+        for v in (listed or {}).values():
+            known.update(v)
+    except Exception:
+        known = None   # can't tell -> treat all as unknown, use direct scaling
+    known_pairs = [(n, w) for n, w in zip(names, weights)
+                   if known is not None and n in known]
+    other_pairs = [(n, w) for n, w in zip(names, weights)
+                   if (n, w) not in known_pairs]
+    if known_pairs:
+        try:
+            pipe.set_adapters([n for n, _ in known_pairs],
+                              [w for _, w in known_pairs])
+            print(f"{log_prefix} stage {stage_idx} weights (known subset): " +
+                  ", ".join(f"{n}={w:.2f}" for n, w in known_pairs))
+        except Exception as e2:
+            print(f"{log_prefix} stage {stage_idx}: subset set_adapters also "
+                  f"failed ({str(e2)[:120]}); falling back to direct scaling")
+            other_pairs = known_pairs + other_pairs
+    for n, w in other_pairs:
+        hit = _set_adapter_scale_direct(transformer, n, w, log_prefix)
+        if hit:
+            print(f"{log_prefix} stage {stage_idx}: '{n}'={w:.2f} set directly "
+                  f"on {hit} PEFT layer(s) (bypassed diffusers set_adapters)")
+        else:
+            print(f"{log_prefix} stage {stage_idx} WARNING: could not set "
+                  f"'{n}' by any route - it keeps its load-time scale")

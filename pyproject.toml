@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eric_krea2"
-version = "1.1.0"
+version = "1.2.0"
 description = "Self-contained ComfyUI custom nodes for Krea 2 (Raw/Turbo): text-to-image, multi-stage high-res, 2x upscale-decode, LoRA stack, conditioning rebalance, and recipe presets."
 authors = [{ name = "Eric Hiss" }]
 readme = "README.md"

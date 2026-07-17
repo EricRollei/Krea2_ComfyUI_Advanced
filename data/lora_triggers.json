@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "loras": {
+    "l:\\models\\loras\\krea2\\art-style\\2514182-john_bolton_style\\3084168-krea2_v1\\3084168_bolton3_000001750.safetensors": {
+      "sig": "228653579|1783053598",
+      "trigger_words": [
+        "A realistic digital painting in the distinctive style of jbolton, dramatic chiaroscuro lighting with strong shadows and highlights, moody dark gothic fantasy atmosphere, detailed realistic rendering with painterly texture and rich brushwork, intense and atmospheric composition."
+      ],
+      "name": "John Bolton style - Krea2 v1",
+      "source": "civitai_id",
+      "fetched_at": "2026-07-17",
+      "civitai_version_id": 3084168,
+      "civitai_model_id": 2514182
+    },
+    "l:\\models\\loras\\krea2\\art-style\\2034105-peter_mohrbacher\\3102544-krea_2\\3102544_mohrbacher_k2.safetensors": {
+      "sig": "228629960|1783667436",
+      "trigger_words": [
+        "Mohrbacherart"
+      ],
+      "name": "Peter Mohrbacher - Krea 2",
+      "source": "civitai_id",
+      "fetched_at": "2026-07-17",
+      "civitai_version_id": 3102544,
+      "civitai_model_id": 2034105
+    }
+  }
+}
