@@ -22,6 +22,90 @@
       "fetched_at": "2026-07-17",
       "civitai_version_id": 3102544,
       "civitai_model_id": 2034105
+    },
+    "l:\\models\\loras\\krea2\\tools\\1155749-hyperdetailed_colored_pencil\\3113897-krea2\\3113897_hyperdetailedcoloredpencilkrea2.safetensors": {
+      "sig": "228587760|1783817243",
+      "trigger_words": [
+        "ArsMJStyle, Colored pencil hyperdetailed realism,"
+      ],
+      "name": "Hyperdetailed Colored Pencil - Krea2",
+      "source": "civitai_id",
+      "fetched_at": "2026-07-17",
+      "civitai_version_id": 3113897,
+      "civitai_model_id": 1155749
+    },
+    "l:\\models\\loras\\krea2\\tools\\krea2_turbo_distill_r256_comp2.safetensors": {
+      "sig": "1717623742|1784096367",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-07-18",
+      "sha256": "4854ce79916c86a3b2b6dd33109e654ef6619c2d624b83320b99026340979923",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\tools\\krea2_turbo_distill_r256_mod2.safetensors": {
+      "sig": "33204248|1784096367",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-07-18",
+      "sha256": "510d13f3241a2cf22259758b37b3713a9ddec81fd7955f5ff18e5b8eff3319e0",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\tools\\krea2_turbo_distill_r256_txt2.safetensors": {
+      "sig": "121383055|1784096367",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-07-18",
+      "sha256": "164dcdbe5a8f5b4aeb0140b5880c322470464bbe1685fa2b657fc1189bef201c",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\art-style\\2537540-brom\\3125138-krea_2\\3125138_brom_krea2_v2.safetensors": {
+      "sig": "228587784|1783975668",
+      "trigger_words": [
+        "bromk2style"
+      ],
+      "name": "Brom - Krea 2",
+      "source": "civitai_id",
+      "fetched_at": "2026-07-19",
+      "civitai_version_id": 3125138,
+      "civitai_model_id": 2537540
+    },
+    "l:\\models\\loras\\krea2\\art-style\\2757144-luis_royo_style_-_krea_2\\3120184-v2_0\\3120184_royo_v2.safetensors": {
+      "sig": "457140288|1783821503",
+      "trigger_words": [
+        "painting in the style of luis royo"
+      ],
+      "name": "Luis Royo Style - Krea 2 - v2.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-07-19",
+      "civitai_version_id": 3120184,
+      "civitai_model_id": 2757144
+    },
+    "l:\\models\\loras\\krea2\\vision\\2756809-krea_2_detail_enhancer___edit_lora\\3102079-v1_0\\3102079_krea-detail-enhancer-exp.safetensors": {
+      "sig": "228587824|1783849799",
+      "trigger_words": [
+        "enhance this image"
+      ],
+      "name": "Krea 2 Detail Enhancer | Edit LoRA - v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-07-20",
+      "civitai_version_id": 3102079,
+      "civitai_model_id": 2756809
+    },
+    "l:\\models\\loras\\krea2\\art-style\\2246886-zburton\\3110328-kreaburton_v1_0\\3110328_kreaburton.safetensors": {
+      "sig": "228587776|1783838254",
+      "trigger_words": [
+        "TimBurton"
+      ],
+      "name": "KreaBurton",
+      "source": "ss_tag_frequency",
+      "fetched_at": "2026-07-20",
+      "sha256": "4ea9763650f34ea970169b87c6371c6dd05977c5c319f3a77eea732fda5061f5"
     }
   }
 }

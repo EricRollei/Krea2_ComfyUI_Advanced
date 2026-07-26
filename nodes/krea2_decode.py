@@ -74,6 +74,18 @@ class EricKrea2DecodeVAELoader:
                     "tooltip": "Load a saved decode-VAE recipe (source / dropdown / dtype) into the "
                                "panel for this run. 'custom' = use the panel as-is. Use the \u2605 "
                                "Save Preset button to add one; the list refreshes on graph reload."}),
+                "vae_tiling": (["auto", "force", "off"], {"default": "auto",
+                    "tooltip": "Tiled-decode policy for THIS VAE, honored by every node that "
+                               "decodes with it. auto: tile only above 128 latent (>1024 px) - "
+                               "previous behavior. force: always tile. off: never tile - for "
+                               "A/B-testing tile-seam pattern noise; a large non-tiled "
+                               "Wan-family decode can leave a bottom-edge band and spike VRAM, "
+                               "so treat off as a diagnostic, not a daily driver."}),
+                "vae_tile_px": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 64,
+                    "tooltip": "Custom tile size in PIXELS (0 = the VAE default). Needs >=256 "
+                               "to take effect; stride is 75% of tile (25% overlap). Bigger "
+                               "tiles = fewer seams, more VRAM. Seam diagnostic: if the "
+                               "pattern pitch moves when you move this, it IS the tiling."}),
             },
         }
 
@@ -82,7 +94,8 @@ class EricKrea2DecodeVAELoader:
     FUNCTION = "load"
     CATEGORY = "Eric/Krea2"
 
-    def load(self, vae_source, dtype="float32", vae_name="none", decode_vae_preset="custom"):
+    def load(self, vae_source, dtype="float32", vae_name="none", decode_vae_preset="custom",
+             vae_tiling="auto", vae_tile_px=0):
         import os
         import torch
         from diffusers import AutoencoderKLWan
@@ -128,6 +141,9 @@ class EricKrea2DecodeVAELoader:
 
         def _finish(vae, how):
             vae = vae.to(device=device, dtype=td).eval()
+            # tiling policy travels WITH the VAE object; standard_decode reads these
+            vae._eric_tiling = str(vae_tiling or "auto").lower()
+            vae._eric_tile_px = int(vae_tile_px or 0)
             zc = getattr(vae.config, "z_dim", "?")
             print(f"[EricKrea2] Decode VAE loaded via {how}: {type(vae).__name__} "
                   f"(z_dim={zc}) -> {device}/{dtype}")

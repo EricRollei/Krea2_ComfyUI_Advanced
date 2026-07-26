@@ -36,6 +36,40 @@ from .. import _settings
 _DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
 
+def _list_models(folder_key, subfolder=None):
+    """Return ['none'] + relative filenames under a ComfyUI model root (e.g.
+    'diffusion_models', 'text_encoders', 'vae'). folder_paths scans the standard
+    models/<key>/ dirs (plus any extra_model_paths.yaml roots) recursively, so files
+    in a subfolder show up as 'sub\\name.safetensors'. If `subfolder` is given, keep
+    only entries whose first path component matches it (case-insensitive) - used to
+    pin the transformer list to models/diffusion_models/krea2/. Only single files are
+    listed (diffusers folders / .gguf-in-a-folder still use the paste-in path field).
+    Safe if folder_paths is unavailable (standalone import) - returns just ['none']."""
+    try:
+        import folder_paths
+        names = list(folder_paths.get_filename_list(folder_key))
+    except Exception:
+        return ["none"]
+    if subfolder:
+        sub = subfolder.lower()
+        names = [n for n in names
+                 if n.replace("\\", "/").split("/", 1)[0].lower() == sub]
+    return ["none"] + names
+
+
+def _resolve_pick(folder_key, name):
+    """Resolve a dropdown pick (relative name from _list_models) to a full path.
+    Returns '' for 'none'/blank/unresolvable so callers can fall back to the pasted
+    path field."""
+    if not name or name == "none":
+        return ""
+    try:
+        import folder_paths
+        return folder_paths.get_full_path(folder_key, name) or ""
+    except Exception:
+        return ""
+
+
 class _Krea2PipelineHandle(dict):
     """Plain-dict wrapper for the loader's output that ALSO supports weakref (a bare
     dict does not). This lets the loader keep only a *weak* reference to the exact
@@ -85,6 +119,20 @@ _COMP_CACHE = getattr(builtins, "_ERIC_KREA2_COMP_CACHE", None)
 if not isinstance(_COMP_CACHE, dict):
     _COMP_CACHE = {"pipeline": None, "cache_key": None, "is_distilled": False}
     builtins._ERIC_KREA2_COMP_CACHE = _COMP_CACHE
+
+
+def _apply_vae_tiling_prefs(pipe_or_dict, mode, tile_px):
+    """Stamp the loader tiling policy onto the pipeline VAE. standard_decode /
+    standard_encode (_latent_utils) read these attrs. Called on every return
+    path, including cache hits, so widget changes apply without a rebuild."""
+    try:
+        pipe = pipe_or_dict.get("pipeline") if isinstance(pipe_or_dict, dict) else pipe_or_dict
+        v = getattr(pipe, "vae", None)
+        if v is not None:
+            v._eric_tiling = str(mode or "auto").lower()
+            v._eric_tile_px = int(tile_px or 0)
+    except Exception:
+        pass
 
 
 def _free_current(cache, log=None):
@@ -448,15 +496,27 @@ class EricKrea2ComponentLoader:
                     "tooltip": "Load a saved loader recipe (paths / precision / attention / device) "
                                "into the panel for this run. 'custom' = use the panel as-is. Use the "
                                "★ Save Preset button to add one; the list refreshes on graph reload."}),
+                "transformer_pick": (_list_models("diffusion_models", "krea2"), {"default": "none",
+                    "tooltip": "Pick a transformer from models/diffusion_models/krea2/. When not "
+                               "'none' this OVERRIDES the transformer_path field below. Single-file "
+                               ".safetensors/.gguf only - use the path field for a diffusers folder."}),
                 "transformer_path": ("STRING", {"default": "",
                     "tooltip": "Override transformer: diffusers folder, bare .safetensors/.bin/.pt, "
-                               "or .gguf (dequantized on load). Empty = use base."}),
+                               "or .gguf (dequantized on load). Empty = use base. Ignored when "
+                               "transformer_pick above is set."}),
+                "text_encoder_pick": (_list_models("text_encoders"), {"default": "none",
+                    "tooltip": "Pick a text encoder from models/text_encoders/. When not 'none' this "
+                               "OVERRIDES the text_encoder_path field below."}),
                 "text_encoder_path": ("STRING", {"default": "",
                     "tooltip": "Override Qwen3-VL text encoder: HF/transformers folder, bare "
-                               ".safetensors, or .gguf. Empty = use base."}),
+                               ".safetensors, or .gguf. Empty = use base. Ignored when "
+                               "text_encoder_pick above is set."}),
+                "vae_pick": (_list_models("vae"), {"default": "none",
+                    "tooltip": "Pick a VAE from models/vae/. When not 'none' this OVERRIDES the "
+                               "vae_path field below."}),
                 "vae_path": ("STRING", {"default": "",
                     "tooltip": "Override VAE (AutoencoderKLQwenImage): diffusers folder or bare "
-                               ".safetensors. Empty = use base."}),
+                               ".safetensors. Empty = use base. Ignored when vae_pick above is set."}),
                 "precision": (["bf16", "fp16", "fp32"], {"default": "bf16",
                     "tooltip": "Compute dtype (bf16 recommended for Blackwell). GGUF is dequantized "
                                "to this dtype."}),
@@ -467,13 +527,26 @@ class EricKrea2ComponentLoader:
                     "tooltip": "Cache the assembled pipeline between runs."}),
                 "offload_vae": ("BOOLEAN", {"default": False,
                     "tooltip": "Keep the VAE on CPU during transformer inference (saves ~1 GB)."}),
+                "vae_tiling": (["auto", "force", "off"], {"default": "auto",
+                    "tooltip": "Tiled-decode/encode policy for the pipeline VAE, honored by "
+                               "standard_decode/standard_encode everywhere. auto: tile only "
+                               "above 128 latent (>1024 px) - previous behavior. force: always "
+                               "tile. off: never tile - tile-seam A/B diagnostic; large "
+                               "non-tiled Wan-family decodes can leave a bottom-edge band and "
+                               "spike VRAM."}),
+                "vae_tile_px": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 64,
+                    "tooltip": "Custom tile size in PIXELS (0 = VAE default). Needs >=256 to "
+                               "take effect; stride is 75% of tile. If the pattern pitch moves "
+                               "when you move this, the pattern IS tile seams."}),
             }
         }
 
     @classmethod
     def IS_CHANGED(cls, base_pipeline_path, transformer_path="", text_encoder_path="",
                    vae_path="", precision="bf16", attention_backend="auto",
-                   device="cuda", keep_in_vram=True, offload_vae=False, loader_preset="custom"):
+                   device="cuda", keep_in_vram=True, offload_vae=False, loader_preset="custom",
+                   transformer_pick="none", text_encoder_pick="none", vae_pick="none",
+                   vae_tiling="auto", vae_tile_px=0):
         # Cheap, GPU-free check (no dequant/segfault risk - see §8 of the session
         # handoff for why an earlier unconditional IS_CHANGED=nan was removed).
         # If our cache is empty (fresh start, or EricKrea2UnloadModels just ran),
@@ -630,7 +703,9 @@ class EricKrea2ComponentLoader:
 
     def load(self, base_pipeline_path, transformer_path="", text_encoder_path="",
              vae_path="", precision="bf16", attention_backend="auto",
-             device="cuda", keep_in_vram=True, offload_vae=False, loader_preset="custom"):
+             device="cuda", keep_in_vram=True, offload_vae=False, loader_preset="custom",
+             transformer_pick="none", text_encoder_pick="none", vae_pick="none",
+             vae_tiling="auto", vae_tile_px=0):
         # Headless / API-run fallback: apply a named preset to the params (the JS
         # normally writes these into the visible panel at edit time).
         if loader_preset and loader_preset != "custom":
@@ -666,6 +741,23 @@ class EricKrea2ComponentLoader:
         text_encoder_path = (text_encoder_path or "").strip()
         vae_path = (vae_path or "").strip()
 
+        # Dropdown picks from the standard model folders take precedence over the
+        # pasted path fields when set to anything other than 'none'. Resolve BEFORE
+        # cache_key/settings so a pick doesn't hash differently than the same file
+        # typed by hand, and so the settings blob records the actual path used.
+        _tp = _resolve_pick("diffusion_models", transformer_pick)
+        if _tp:
+            transformer_path = _tp
+            log(f"transformer_pick -> {transformer_path}")
+        _ep = _resolve_pick("text_encoders", text_encoder_pick)
+        if _ep:
+            text_encoder_path = _ep
+            log(f"text_encoder_pick -> {text_encoder_path}")
+        _vp = _resolve_pick("vae", vae_pick)
+        if _vp:
+            vae_path = _vp
+            log(f"vae_pick -> {vae_path}")
+
         loader_settings = _settings.wrap("loader", {
             "base_pipeline_path": base_pipeline_path,
             "transformer_path": transformer_path,
@@ -685,8 +777,14 @@ class EricKrea2ComponentLoader:
         if keep_in_vram and cache["pipeline"] is not None and cache["cache_key"] == cache_key:
             log("using cached component pipeline")
             apply_attention_backend(cache["pipeline"].transformer, attention_backend, log=log)
+            _apply_vae_tiling_prefs(cache["pipeline"], vae_tiling, vae_tile_px)
             return ({"pipeline": cache["pipeline"], "is_distilled": cache["is_distilled"],
-                     "model_path": base_pipeline_path}, loader_settings)
+                     "model_path": base_pipeline_path,
+                     # Carried for downstream provenance (sweep naming + cell
+                     # metadata): the fine-tune identity and the full wrapped
+                     # loader recipe. Additive keys; all consumers use .get().
+                     "transformer_path": transformer_path,
+                     "loader_settings": loader_settings}, loader_settings)
 
         # Building a new pipeline: free the previous one FIRST so we never hold two sets of
         # weights in VRAM at once (the transformer-swap OOM), and so keep_in_vram=False releases
@@ -738,7 +836,9 @@ class EricKrea2ComponentLoader:
             pass
 
         result = _Krea2PipelineHandle(pipeline=pipe, is_distilled=is_distilled,
-                                      model_path=base_pipeline_path)
+                                      model_path=base_pipeline_path,
+                                      transformer_path=transformer_path,
+                                      loader_settings=loader_settings)
 
         if keep_in_vram:
             # Persist for reuse across runs (see the cache-hit check at the top).
@@ -760,6 +860,7 @@ class EricKrea2ComponentLoader:
             log("keep_in_vram=False: not caching the pipeline. After this run, free VRAM with "
                 "ComfyUI's 'Free model and node cache' button or the Krea2 Unload node.")
 
+        _apply_vae_tiling_prefs(result, vae_tiling, vae_tile_px)
         return (result, loader_settings)
 
 

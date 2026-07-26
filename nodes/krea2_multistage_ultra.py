@@ -29,6 +29,7 @@ guidance 0; Raw 28-52 steps / cfg ~3.5.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 import torch
@@ -37,12 +38,15 @@ from .._latent_utils import (
     _pack_latents, _upscale_latents, _add_noise_flowmatch, _check_cancelled, standard_decode,
 )
 from .._upscale_vae import upscale_between_stages, decode_latents_with_upscale_vae
-from .._res_solver import res_multistep_sample, res_2s_sample, deis_sample
+from .._res_solver import (res_multistep_sample, res_2s_sample, deis_sample,
+                           rk_explicit_sample, lcm_sample, lcm_hybrid_sample)
 from .. import _sigmas
+from .. import _telemetry
 
 _VAE_SCALE_FACTOR = 8  # AutoencoderKLQwenImage is f8
 _SCHEDULES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent", "exponential"]
-_SAMPLERS = ["euler", "res_2m", "res_2s", "deis_3m", "deis_4m"]
+_SAMPLERS = ["euler", "res_2m", "res_2s", "deis_3m", "deis_4m", "rk6_7s", "abnorsett_4m", "lcm",
+             "lcm_hybrid", "lcm_hybrid2"]
 _NOISE_TYPES = ["white", "low_freq", "high_freq", "pink"]
 _NOISE_STRENGTH = 0.30  # how far non-white noise leans from white (kept low so the
                         # flow-match denoiser, trained on white noise, can still clean it)
@@ -189,14 +193,87 @@ def _packed_seq_len(height: int, width: int, vsf: int) -> int:
     return (h_lat // 2) * (w_lat // 2)
 
 
-def _compute_mu(seq_len: int, scheduler, is_distilled: bool) -> float:
-    if is_distilled:
-        return 1.15
+def _renorm_hop(dst, ref, mode, tag):
+    """Inter-stage hop statistics repair + flatness telemetry (2026-07-23).
+
+    Latent interpolation is a lowpass: it shrinks latent variance, and decoded
+    variance IS contrast/saturation - each hop drains a little, and multi-stage
+    chains compound it into the progressive flattening/desaturation Eric
+    observed. Modes: "off" (previous behavior, telemetry only), "global" (match
+    the pre-hop latent's overall mean/std), "per_channel" (match per-channel
+    mean/std - the strongest color/contrast hold). Handles packed (B, seq, C;
+    channel LAST) and unpacked (B, C, H, W) layouts. Fail-silent by design.
+    """
+    try:
+        def _stats(t, per_ch):
+            if not per_ch:
+                return t.mean(), t.std()
+            if t.dim() == 4:                    # (B, C, H, W)
+                return (t.mean(dim=(0, 2, 3), keepdim=True),
+                        t.std(dim=(0, 2, 3), keepdim=True))
+            return (t.mean(dim=(0, 1), keepdim=True),   # (B, seq, C)
+                    t.std(dim=(0, 1), keepdim=True))
+
+        pre = float(ref.float().std())
+        post = float(dst.float().std())
+        m = str(mode or "off").lower()
+        if m in ("global", "per_channel"):
+            rmu, rsd = _stats(ref.float(), m == "per_channel")
+            dmu, dsd = _stats(dst.float(), m == "per_channel")
+            out = ((dst.float() - dmu) / (dsd + 1e-8) * rsd + rmu).to(dst.dtype)
+            print(f"[EricKrea2-MS]   latent std {tag}: {pre:.4f} -> hop {post:.4f} -> "
+                  f"renorm({m}) {float(out.float().std()):.4f}")
+            return out
+        print(f"[EricKrea2-MS]   latent std {tag}: {pre:.4f} -> hop {post:.4f} (renorm off)")
+        return dst
+    except Exception:
+        return dst
+
+
+def _compute_mu(seq_len: int, scheduler, is_distilled: bool, policy=None, stage=None) -> float:
+    """Flow-matching shift exponent (mu) for one stage.
+
+    Raw/base: the scheduler-config linear rule in seq_len (resolution-aware, as
+    Krea2Pipeline.__call__ does) - the `policy` is ignored.
+
+    Distilled/Turbo: distillation baked a FIXED mu=1.15 (calibrated <=2K /
+    ~max_image_seq_len tokens). Above that band a fixed shift under-shifts the
+    schedule and upscaled stages keep mid-frequency mottling (splotch bug,
+    diagnosed 2026-07-21). `policy` comes from the distilled_shift widgets:
+      {"mode": "fixed"|"resolution"|"manual", "mu": {"s1":f, "s2":f, "s3":f}}
+    with `stage` naming the current stage. When no policy is threaded (external
+    caller), the KREA2_DISTILLED_SHIFT env var is honored as a debug fallback
+    ("fixed"/"resolution"/<number>)."""
     base_seq = scheduler.config.get("base_image_seq_len", 256)
     max_seq = scheduler.config.get("max_image_seq_len", 6400)
     base_shift = scheduler.config.get("base_shift", 0.5)
     max_shift = scheduler.config.get("max_shift", 1.15)
     m = (max_shift - base_shift) / (max_seq - base_seq)
+    if is_distilled:
+        mu_map = {}
+        if isinstance(policy, dict):
+            mode = str(policy.get("mode", "fixed") or "fixed").lower()
+            mu_map = policy.get("mu") or {}
+        else:
+            mode = os.environ.get("KREA2_DISTILLED_SHIFT", "fixed").strip().lower()
+        if mode in ("", "fixed"):
+            return 1.15
+        if mode == "resolution":
+            mu = max(1.15, 1.15 + m * (seq_len - max_seq))
+            print(f"[EricKrea2-MS] distilled shift 'resolution' ({stage or '?'}): "
+                  f"seq {seq_len} -> mu {mu:.3f}")
+            return mu
+        if mode == "manual":
+            mu = float(mu_map.get(stage or "s1", 1.15))
+            print(f"[EricKrea2-MS] distilled shift manual ({stage or 's1'}): mu {mu:.3f}")
+            return mu
+        try:  # env-var numeric override (debug fallback path only)
+            mu = float(mode)
+            print(f"[EricKrea2-MS] distilled shift env override: mu {mu:.3f}")
+            return mu
+        except ValueError:
+            print(f"[EricKrea2-MS] KREA2_DISTILLED_SHIFT='{mode}' not understood; using fixed 1.15")
+            return 1.15
     b = base_shift - m * base_seq
     return m * seq_len + b
 
@@ -293,7 +370,8 @@ def _jitter_embeds(embeds, strength, generator):
 @torch.no_grad()
 def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
                         is_distilled, guidance_scale, eta, generator, progress_cb=None,
-                        sigma_window=None, method="res_2m", cond_override=None, noise_type="white"):
+                        sigma_window=None, method="res_2m", cond_override=None, noise_type="white",
+                        shift_policy=None, shift_stage=None, hybrid_split=0.5):
     """Run the RES multistep (res_2m) sampler over the Krea2 transformer directly,
     bypassing pipe.__call__. Returns the packed latent (same format as pipe(...).images).
 
@@ -345,7 +423,8 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
     if sigma_window is not None:
         sigmas = sigma_window.to(device=device, dtype=torch.float32)
     else:
-        mu = _compute_mu(x.shape[1], pipe.scheduler, is_distilled)
+        mu = _compute_mu(x.shape[1], pipe.scheduler, is_distilled,
+                         policy=shift_policy, stage=shift_stage)
         pipe.scheduler.set_timesteps(sigmas=list(raw_sigmas), device=device, mu=mu)
         sigmas = pipe.scheduler.sigmas.to(device=device, dtype=torch.float32)  # [keep+1], ends at 0
 
@@ -390,6 +469,46 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
     elif method == "deis_4m":
         out = deis_sample(denoise_fn, x, sigmas, max_order=4, eta=float(eta or 0.0),
                           noise_sampler=noise_sampler, callback=_cb)
+    elif method == "abnorsett_4m":
+        # exponential Adams-Bashforth-Norsett order 4: in our kernel-exact solver
+        # formulation this IS deis order-4 (see _res_solver.py) - recipe-name alias.
+        out = deis_sample(denoise_fn, x, sigmas, max_order=4, eta=float(eta or 0.0),
+                          noise_sampler=noise_sampler, callback=_cb)
+    elif method == "rk6_7s":
+        out = rk_explicit_sample(denoise_fn, x, sigmas, tableau="rk6_7s",
+                                 eta=float(eta or 0.0), noise_sampler=noise_sampler,
+                                 callback=_cb)
+    elif method == "euler":
+        # eta CLAMPED to 0 for euler (2026-07-25, Eric's ruling): the GUI
+        # tooltips promise "euler ignores eta" and Stage 1 euler bypasses this
+        # dispatch entirely (pipe path, no eta), so refine-stage euler honoring
+        # churn here would make the same widget mean different things per
+        # stage. One contract everywhere: euler is the deterministic baseline;
+        # for 1st-order + churn use res_2m at low eta instead.
+        out = rk_explicit_sample(denoise_fn, x, sigmas, tableau="euler",
+                                 eta=0.0, noise_sampler=noise_sampler,
+                                 callback=_cb)
+    elif method in ("lcm", "lcm_hybrid", "lcm_hybrid2"):
+        # lcm-family draws are ALWAYS plain seeded WHITE, regardless of eta or
+        # noise_type (2026-07-23): the full re-noise replaces the latent
+        # wholesale, and the model was trained on WHITE noise at every sigma -
+        # a full replacement with shaped/colored noise is out-of-distribution
+        # and decodes as chromatic blotches over the image ("rainbow").
+        # noise_type shaping stays with the FRACTIONAL SDE churn samplers
+        # (res/deis/rk at eta>0), where the injected deviation is small.
+        _ns = (lambda s, sn: torch.randn(
+            x.shape, device=device, dtype=torch.float32, generator=generator))
+        if method == "lcm":
+            out = lcm_sample(denoise_fn, x, sigmas, noise_sampler=_ns, callback=_cb)
+        else:
+            # lcm_hybrid: lcm churn -> deis_3m tail; lcm_hybrid2: lcm -> res_2m
+            # tail (2026-07-25 - res_2m was testing better than deis_3m as the
+            # detail-development half). hybrid_split sets the handoff fraction.
+            out = lcm_hybrid_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+                                    noise_sampler=_ns, callback=_cb,
+                                    second=("res_2m" if method == "lcm_hybrid2"
+                                            else "deis_3m"),
+                                    split_frac=float(hybrid_split))
     else:
         out = res_multistep_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
                                    noise_sampler=noise_sampler, callback=_cb)
@@ -416,22 +535,25 @@ class EricKrea2MultistageUltra:
                                "still applies. 'prompt' is ignored for the positive side when this is connected, "
                                "but still used for the negative side and console logging."}),
                 "ref_latents": ("KREA2_REF_LATENTS", {
-                    "tooltip": "Optional reference latents (from Eric Krea2 Reference Latents). Appends "
-                               "VAE-encoded reference tokens to the image sequence at t=0 modulation "
-                               "(ai-toolkit 'index_timestep_zero' edit method). ONLY does something useful "
-                               "with an edit-trained LoRA loaded (e.g. the Krea 2 Style Reference LoRA at "
-                               "~0.4-0.5 strength - 1.0 is reported to break/fragment the image); the base "
-                               "model ignores what it can't read. Intended for Turbo at guidance 0 - with "
-                               "CFG on, refs condition both passes and partially cancel."}),
+                    "tooltip": "Optional reference latents (from Eric Krea2 Reference Latents). That "
+                               "node's edit_recipe picks the mechanism: ostris_t0 appends refs at t=0 "
+                               "modulation (style/reference LoRAs, ~0.4-0.5 strength - 1.0 is reported "
+                               "to break/fragment the image); edit_frame prepends the source on the "
+                               "target grid at shared timestep (identity/instruction edit LoRAs at 1.0, "
+                               "pixel-fit to this run's S1 size, conditions S1 only). ONLY does "
+                               "something useful with a matching edit-trained LoRA loaded; the base "
+                               "model ignores what it can't read. Turbo at guidance 0 for most use; "
+                               "edit_frame removals want Raw at CFG ~3 with an EMPTY negative."}),
                 "ref_match_size": ("BOOLEAN", {"default": True,
-                    "tooltip": "Rescale ref_latents (in latent space, no re-encode) to this run's resolved "
-                               "Stage 1 size before denoising. Reference tokens share the live image's "
-                               "(0,0)-origin rotary grid (offset only on the frame axis), so a size mismatch "
-                               "between the reference's own grid and Stage 1's grid biases attention toward "
-                               "the overlapping corner - looks like the reference pasted in a shrunken corner "
-                               "at small Stage 1 sizes, a fragmented partial copy at large ones. ON (default) "
-                               "fixes this automatically, mirroring init_match_size. OFF = use the reference "
-                               "at whatever size it was encoded at in Eric Krea2 Reference Latents."}),
+                    "tooltip": "ostris_t0 recipe only (edit_frame always pixel-fits + re-encodes at S1 "
+                               "size instead). Rescale ref_latents (in latent token space, no re-encode) "
+                               "to this run's resolved Stage 1 size before denoising. NOTE: the ostris "
+                               "node/training never matches refs to the target (own grid, <=1MP cap), so "
+                               "for the Style Reference LoRA try OFF first - ON deviates from the trained "
+                               "geometry and the token-space resample slightly softens the reference. ON "
+                               "remains available for the corner-bias failure mode (reference pasted in a "
+                               "shrunken corner / fragmented partial copy) if OFF misbehaves at your "
+                               "sizes."}),
                 "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "cond_preset": (["custom"] + sorted(cls._load_cond_presets().keys()), {"default": "custom",
                     "tooltip": "Preset library of rebalance profiles (from cond_presets.json). 'custom' "
@@ -513,7 +635,21 @@ class EricKrea2MultistageUltra:
                                "cost as euler). res_2s: RES 2nd-order SINGLE-step predictor/corrector "
                                "(strongest at low steps, ~2x slower). deis_3m / deis_4m: DEIS 3rd/4th "
                                "-order multistep (very smooth, same cost as euler). All but euler honour "
-                               "a noisy early end_step. Recommended: res_2s + beta57 for Stage 1."}),
+                               "a noisy early end_step. rk6_7s: 6th-order 7-stage explicit Runge-Kutta " 
+                               "- highest solver accuracy, ~7x model calls per step (the kreamania " 
+                               "finetuner pass-1 recipe with linear_quadratic sigmas). abnorsett_4m: " 
+                               "exponential Adams-Bashforth-Norsett 4th-order multistep, 1 call/step " 
+                               "(identical to deis_4m in this solver - recipe-name alias; the " 
+                               "kreamania pass-2 pick with bong_tangent). Recommended: res_2s + " 
+                               "beta57 for Stage 1. lcm: full ancestral - every step jumps to "
+                               "x0 and fully re-noises to the next sigma (ignores eta, always "
+                               "seeded). The artifact-launderer: strongest choice for "
+                               "post-upscale refine windows (the native euler->lcm two-pass "
+                               "trick); too churny for Stage 1. lcm_hybrid: lcm churn for the "
+                               "first half of the window, then deis_3m for the second half - "
+                               "launders entry damage, then develops detail trajectory-faithfully "
+                               "(the detail-preserving alternative when plain lcm eats fine "
+                               "detail)."}),
                 "s1_noise": (_NOISE_TYPES, {"default": "white",
                     "tooltip": "Shapes the SDE ancestral-churn noise only (eta>0, non-euler samplers) - "
                                "NOT the primary init, which is always plain white. white is recommended; "
@@ -657,6 +793,58 @@ class EricKrea2MultistageUltra:
                     "tooltip": "Also decode stage 1 and stage 2 to images (stage1_image / "
                                "stage2_image outputs) for parameter tuning. Costs one extra "
                                "1x decode per stage; off by default."}),
+                # -- distilled shift policy (added 2026-07-21; appended LAST so saved --
+                # -- workflows keep their positional widget values intact           --
+                "distilled_shift": (["fixed", "resolution", "manual"], {"default": "fixed",
+                    "tooltip": "Per-stage flow-matching shift (mu) policy for DISTILLED/Turbo "
+                               "models (Raw is already resolution-aware and ignores this).\n"
+                               "fixed: mu=1.15 everywhere - Krea's distillation value, calibrated "
+                               "for <=2K. Above that the schedule is under-shifted and upscale "
+                               "error can survive as mottling/splotches on many fine tunes.\n"
+                               "resolution: keep 1.15 up to the ~1.6MP calibration band, extend "
+                               "mu automatically above it (recommended starting point).\n"
+                               "manual: dial each stage with shift_mu_s1/s2/s3 below.\n"
+                               "NOTE: fixed and resolution IGNORE the shift_mu fields below "
+                               "(manual only). Stages set to the euler sampler skip this policy "
+                               "entirely and run the stock diffusers flow-match shift instead.\n"
+                               "Rule of thumb: LOWER mu = more low-sigma time = more fine "
+                               "detail/texture (but mottling risk at high res); HIGHER mu = more "
+                               "high-sigma time = smoother, cleaner structure (too high = "
+                               "soft/waxy)."}),
+                "shift_mu_s1": ("FLOAT", {"default": 1.15, "min": 0.1, "max": 10.0, "step": 0.05,
+                    "tooltip": "Manual mu for Stage 1 - used ONLY when distilled_shift=manual "
+                               "(fixed/resolution ignore it, and euler stages ignore it too). "
+                               "1.15 = Turbo default; usually leave it there for <=2MP S1. "
+                               "Lower = more detail, higher = smoother."}),
+                "shift_mu_s2": ("FLOAT", {"default": 1.15, "min": 0.1, "max": 10.0, "step": 0.05,
+                    "tooltip": "Manual mu for Stage 2 - used ONLY when distilled_shift=manual "
+                               "(fixed/resolution ignore it, and euler stages ignore it too). "
+                               "Try 2.0-3.0 at 4-8MP if splotches persist. Lower = more fine "
+                               "detail/texture, higher = smoother/cleaner (too high = soft/waxy)."}),
+                "shift_mu_s3": ("FLOAT", {"default": 1.15, "min": 0.1, "max": 10.0, "step": 0.05,
+                    "tooltip": "Manual mu for Stage 3 - used ONLY when distilled_shift=manual "
+                               "(fixed/resolution ignore it, and euler stages ignore it too). "
+                               "Usually matches or slightly exceeds shift_mu_s2. Lower = more "
+                               "detail, higher = smoother."}),
+                "upscale_renorm": (["off", "global", "per_channel"], {"default": "off",
+                    "tooltip": "Repair inter-stage latent statistics after each upscale hop. "
+                               "Latent interpolation is a lowpass that shrinks variance, and "
+                               "decoded variance IS contrast/saturation - each hop drains a "
+                               "little and stages compound it into progressive flattening / "
+                               "desaturation. per_channel: re-match each channel's mean/std to "
+                               "the pre-hop latent (strongest color+contrast hold; recommended). "
+                               "global: overall mean/std only. off: previous behavior. A "
+                               "telemetry line prints latent std pre-hop / post-hop / "
+                               "post-renorm in every mode, so the drain is measurable."}),
+                "hybrid_split": ("FLOAT", {"default": 0.5, "min": 0.05, "max": 0.95, "step": 0.05,
+                    "tooltip": "Handoff point for the lcm_hybrid / lcm_hybrid2 samplers, as a "
+                               "fraction of the stage's denoise window: lcm full-churn runs the "
+                               "first part (launders upscale damage at high sigma), then the "
+                               "tail sampler develops detail (lcm_hybrid: deis_3m; lcm_hybrid2: "
+                               "res_2m). 0.5 = historical behavior (odd counts give the churn "
+                               "half the extra step). Lower = more trajectory-faithful detail, "
+                               "higher = more laundering. Ignored by every other sampler. "
+                               "Sweepable via combos JSON: {\"hybrid_split\": 0.33}."}),
             },
         }
 
@@ -707,11 +895,21 @@ class EricKrea2MultistageUltra:
         pipe = krea2_pipeline["pipeline"]
         if pipe is None:
             pipe = self._recover_unloaded_pipeline(krea2_pipeline)
-        from .._lora_utils import realize_lora_stack, unload_all_loras
+        from .._lora_utils import (realize_lora_stack, unload_all_loras,
+                                   assert_clean_baseline)
         lora_stack = krea2_pipeline.get("lora_stack", []) or []
         self._lora_runtime = None
         if lora_stack:
             self._lora_runtime = (lora_stack, realize_lora_stack(pipe, lora_stack))
+        else:
+            # No stack declared (stack node absent OR toggled off) -> the expected
+            # state is NO LoRA effects. Enforce it instead of assuming it: a prior
+            # run's failed/partial unload (or non-ephemeral leftovers) must not
+            # leak into this run silently - that was exactly the 2026-07-21
+            # "stack off but gens still contaminated" bug. Cheap no-op on a clean
+            # pipe; assert_clean_baseline prints ONLY if residue survives.
+            unload_all_loras(pipe)
+            assert_clean_baseline(pipe)
         # Conditioning rebalance (opt-in): emphasize the positive prompt's
         # Qwen3-VL layer taps natively (community anti-dampening trick). Pops its
         # own kwargs so _generate_inner's signature is untouched. Also returns the
@@ -734,14 +932,21 @@ class EricKrea2MultistageUltra:
         ref_match_size = kwargs.pop("ref_match_size", True)
         ref_orig = None
         if isinstance(ref_bundle, dict) and ref_bundle.get("packed"):
-            from .._ref_latents import install_ref_latents, resize_ref_bundle_to_dims
-            if ref_match_size:
-                s1_w, s1_h = _resolve_s1_dims(
-                    kwargs.get("aspect_ratio", "5:4 landscape"), kwargs.get("s1_megapixels", 3.0),
-                    kwargs.get("width", 0), kwargs.get("height", 0), kwargs.get("init_latent"),
-                    kwargs.get("init_match_size", True), verbose=False)
+            from .._ref_latents import (install_ref_latents, resize_ref_bundle_to_dims,
+                                        encode_refs_at_dims)
+            ref_recipe = str(ref_bundle.get("recipe", "ostris_t0") or "ostris_t0")
+            s1_w, s1_h = _resolve_s1_dims(
+                kwargs.get("aspect_ratio", "5:4 landscape"), kwargs.get("s1_megapixels", 3.0),
+                kwargs.get("width", 0), kwargs.get("height", 0), kwargs.get("init_latent"),
+                kwargs.get("init_match_size", True), verbose=False)
+            if ref_recipe == "edit_frame":
+                # Edit recipe: the source grid MUST equal the generation grid
+                # (trained on same-size pairs). Pixel-space fit + re-encode at the
+                # resolved S1 size; ref_match_size (token-space) does not apply.
+                ref_bundle = encode_refs_at_dims(pipe, ref_bundle, s1_w, s1_h)
+            elif ref_match_size:
                 ref_bundle = resize_ref_bundle_to_dims(pipe, ref_bundle, s1_w, s1_h)
-            ref_orig = install_ref_latents(pipe, ref_bundle)
+            ref_orig = install_ref_latents(pipe, ref_bundle, recipe=ref_recipe)
         try:
             return self._generate_inner(**kwargs)
         finally:
@@ -843,9 +1048,33 @@ class EricKrea2MultistageUltra:
                  cond_jitter=0.0, cond_jitter_seed=-1,
                  turbo_guidance="off",
                  upscale_vae=None, upscale_vae_mode="disabled", s1_s2_upscale_vae=False,
-                 decode_vae=None, preview_stages=False, sigmas=None):
+                 decode_vae=None, preview_stages=False, sigmas=None,
+                 distilled_shift="fixed", shift_mu_s1=1.15, shift_mu_s2=1.15, shift_mu_s3=1.15,
+                 upscale_renorm="off", hybrid_split=0.5, _s1_reuse=None):
         pipe = krea2_pipeline["pipeline"]
         is_distilled = krea2_pipeline.get("is_distilled", False)
+        # Distilled shift policy (2026-07-21): per-stage mu for Turbo models - see
+        # _compute_mu. Always announce the resolved mode so the active policy is
+        # visible in the console (a silent 'fixed' hid the pre-GUI env-var hook).
+        shift_policy = {"mode": str(distilled_shift or "fixed").lower(),
+                       "mu": {"s1": float(shift_mu_s1), "s2": float(shift_mu_s2),
+                              "s3": float(shift_mu_s3)}}
+        if is_distilled:
+            _sp = shift_policy["mode"]
+            if _sp == "manual":
+                print(f"[EricKrea2-MS] distilled_shift=manual: mu s1={shift_mu_s1:.2f} "
+                      f"s2={shift_mu_s2:.2f} s3={shift_mu_s3:.2f}")
+            elif _sp == "resolution":
+                print("[EricKrea2-MS] distilled_shift=resolution "
+                      "(mu grows past 1.15 above the ~1.6MP calibration band)")
+            else:
+                print("[EricKrea2-MS] distilled_shift=fixed (mu=1.15 every stage)")
+            if _sp != "fixed" and s1_sampler == "euler":
+                print("[EricKrea2-MS] NOTE: Stage 1 TEXT-TO-IMAGE with sampler=euler runs "
+                      "through the stock diffusers pipe (its own fixed mu=1.15), so the "
+                      "policy reaches that one path only via a non-euler S1 sampler. All "
+                      "WINDOWED stages (img2img S1, S2, S3) honor the policy with every "
+                      "sampler, euler included (2026-07-22 shift-mismatch fix).")
         # Legacy fallback: older graphs saved a single global 'eta'. If explicitly passed,
         # it seeds all three per-stage etas (per-stage widgets override on new graphs).
         if eta is not None:
@@ -1024,16 +1253,19 @@ class EricKrea2MultistageUltra:
                  + (_win_len(s2_steps, s2_start_step, s2_end_step) if do_s2 else 0)
                  + (_win_len(s3_steps, s3_start_step, s3_end_step) if do_s3 else 0))
         pbar = comfy.utils.ProgressBar(total)
+        _telem = _telemetry.StageTracker(device)
 
         def make_cb():
             def on_step_end(_pipe, step_idx, _t, cb_kwargs):
                 pbar.update(1)
+                _telem.step()
                 _check_cancelled()
                 return cb_kwargs
             return on_step_end
 
         def _res_progress():
             pbar.update(1)
+            _telem.step()
             _check_cancelled()
 
         def _resolve_sched(stage_key, steps, default_sched):
@@ -1047,12 +1279,13 @@ class EricKrea2MultistageUltra:
             return default_sched, default_sched
 
         def _denoise_stage(up_lat, dst_h, dst_w, steps, cfg, start_step, end_step,
-                           sched, noise_type, gen, tag, sampler, sched_label=None, stage_eta=0.0):
+                           sched, noise_type, gen, tag, sampler, sched_label=None, stage_eta=0.0,
+                           stage_key=None):
             """Re-noise an upscaled latent to a chosen step of a `steps`-length schedule,
             then denoise the [start_step, end_step] window (reference-workflow handoff).
             start_step sets the injection / re-noise level (replaces denoise-strength);
             end_step < steps stops early and hands a still-noisy latent to the next stage
-            (res_2m honours this; euler always runs to sigma 0). `sched` may be a schedule
+            (honoured by every sampler; euler runs as a 1-stage RK). `sched` may be a schedule
             name (str) or a precomputed raw sigma list (from a KREA2_SIGMAS override)."""
             _check_cancelled()
             steps = max(1, int(steps))
@@ -1061,7 +1294,8 @@ class EricKrea2MultistageUltra:
             # full schedule with the chosen spacing, shifted exactly as pipe.__call__ would
             full_raw = build_sigma_schedule(steps, 1.0, sched) if isinstance(sched, str) else list(sched)
             label = sched_label or (sched if isinstance(sched, str) else "custom")
-            mu = _compute_mu(_packed_seq_len(dst_h, dst_w, vsf), pipe.scheduler, is_distilled)
+            mu = _compute_mu(_packed_seq_len(dst_h, dst_w, vsf), pipe.scheduler, is_distilled,
+                             policy=shift_policy, stage=stage_key)
             pipe.scheduler.set_timesteps(sigmas=list(full_raw), device=device, mu=mu)
             full_shifted = pipe.scheduler.sigmas.to(device=device, dtype=torch.float32)  # [steps+1], ->0
             window = full_shifted[start_step:end_step + 1].clone()   # shifted sigmas for this window
@@ -1080,33 +1314,20 @@ class EricKrea2MultistageUltra:
                   f"({end_step - start_step} denoise steps), guidance={cfg}, {label}/{noise_type}, "
                   f"sampler={sampler}, start_sigma={start_sigma:.3f}, end_sigma={end_sigma:.3f}"
                   f"{'' if ends_clean else ' (NOISY handoff)'} --")
-            if sampler != "euler":
-                return _res_denoise_packed(pipe, prompt, neg, dst_h, dst_w, noised, None,
-                                           is_distilled, float(cfg), float(stage_eta), gen,
-                                           progress_cb=_res_progress, sigma_window=window,
-                                           method=sampler, cond_override=_cond_override,
-                                           noise_type=noise_type)
-            # euler / pipe path: the pipe re-shifts and appends a terminal 0, so euler always
-            # runs to sigma 0 (early end_step is honoured only by the RES/DEIS solvers). euler
-            # also has no SDE-churn hook at all (diffusers' pipe() takes no noise_sampler), so
-            # noise_type has no effect here regardless of eta.
-            if not ends_clean:
-                print(f"[EricKrea2-MS]    note: euler ignores early end_step ({end_step}<{steps}); "
-                      f"it denoises to sigma 0. Use res_2m/res_2s/deis_* for a noisy early-stop handoff.")
-            if noise_type and noise_type != "white" and stage_eta and stage_eta > 0:
-                print(f"[EricKrea2-MS]    note: noise_type={noise_type} has no effect with sampler=euler "
-                      "(no SDE churn hook). Use res_2m/res_2s/deis_* to actually apply it.")
-            raw_window = list(full_raw[start_step:end_step])
-            _prompt_kwargs = ({"prompt_embeds": _cond_override[0], "prompt_embeds_mask": _cond_override[1]}
-                             if _cond_override is not None else {"prompt": prompt})
-            res = pipe(
-                negative_prompt=neg, height=dst_h, width=dst_w,
-                num_inference_steps=len(raw_window), sigmas=raw_window,
-                guidance_scale=float(cfg), generator=gen,
-                latents=noised, callback_on_step_end=make_cb(), output_type="latent",
-                **_prompt_kwargs,
-            )
-            return res.images
+            _telem.begin(tag)
+            # ALL samplers - euler included (as a 1-stage RK tableau) - go through our
+            # solver with the SAME shifted window used for the re-noise above. The old
+            # euler special-case handed `noised` to pipe(...), which re-shifts the raw
+            # window with its own FIXED mu=1.15; under a per-stage shift policy the
+            # re-noise level and the solver's first sigma then disagreed, and the
+            # mismatch grew with the policy delta - mild noise at S2, full garble at
+            # S3 (the 2026-07-22 shift-mismatch bug). One path, one sigma space.
+            return _res_denoise_packed(pipe, prompt, neg, dst_h, dst_w, noised, None,
+                                       is_distilled, float(cfg), float(stage_eta), gen,
+                                       progress_cb=_res_progress, sigma_window=window,
+                                       method=sampler, cond_override=_cond_override,
+                                       noise_type=noise_type, hybrid_split=hybrid_split,
+                                       shift_policy=shift_policy, shift_stage=stage_key)
 
         def _latent_dict(lat, h, w):
             return {"packed": lat.detach(), "height": h, "width": w, "vae_scale_factor": vsf}
@@ -1130,7 +1351,21 @@ class EricKrea2MultistageUltra:
         # Stage 1 - img2img (re-noise a supplied init latent) or draft from noise
         _check_cancelled()
         _lora_stage(1)
-        if init_latent is not None:
+        # Sweep S1-latent reuse (2026-07-24, sweep v1.1): when the sweep driver
+        # supplies a captured post-S1 latent (identical panel S1, fixed seed,
+        # cell overrides strictly s2_*/s3_*), skip the Stage 1 denoise entirely.
+        # Refused under same_all_stages seed_mode: S2 shares S1's generator
+        # OBJECT there, so skipping S1 would leave it un-advanced and change
+        # S2's noise draw vs a full run (cells would stop being comparable).
+        if _s1_reuse is not None and seed_mode == "same_all_stages":
+            print("[EricKrea2-MS] S1 reuse disabled: seed_mode=same_all_stages would "
+                  "change Stage 2 noise vs a full run - running Stage 1 normally.")
+            _s1_reuse = None
+        if _s1_reuse is not None:
+            cur_lat = _s1_reuse["packed"].to(device)
+            print(f"[EricKrea2-MS] -- Stage 1: REUSED sweep latent "
+                  f"{int(_s1_reuse['width'])}x{int(_s1_reuse['height'])} (denoise skipped) --")
+        elif init_latent is not None:
             # img2img: resize the init latent to the S1 grid and run it through the SAME
             # re-noise/denoise-window mechanic S2/S3 use. s1_start_step is the denoise-strength
             # control (0 = ~pure noise/text-to-image; higher preserves more of the source).
@@ -1145,7 +1380,7 @@ class EricKrea2MultistageUltra:
             _s1_sched, _s1_label = _resolve_sched("s1", int(s1_steps), s1_schedule)
             cur_lat = _denoise_stage(init_up, s1_h, s1_w, s1_steps, s1_cfg, s1_start_step, _s1_end,
                                      _s1_sched, s1_noise, gen_s1, "Stage 1 (img2img)", s1_sampler,
-                                     sched_label=_s1_label, stage_eta=s1_eta)
+                                     sched_label=_s1_label, stage_eta=s1_eta, stage_key="s1")
         else:
             _s1_sched, _s1_label = _resolve_sched("s1", int(s1_steps), s1_schedule)
             s1_sigmas = (build_sigma_schedule(int(s1_steps), 1.0, _s1_sched)
@@ -1162,11 +1397,14 @@ class EricKrea2MultistageUltra:
                              else f", trim {_crop_rows}row at final")
             print(f"[EricKrea2-MS] -- Stage 1: {s1_w}x{s1_h}, {s1_steps} steps, "
                   f"guidance={s1_cfg}, {_s1_label}/{s1_noise}, sampler={s1_sampler}{_crop_msg} --")
+            _telem.begin("Stage 1")
             if s1_sampler != "euler":
                 cur_lat = _res_denoise_packed(pipe, prompt, neg, s1_h, s1_w, s1_init, s1_sigmas,
                                               is_distilled, float(s1_cfg), float(s1_eta), gen_s1,
                                               progress_cb=_res_progress, method=s1_sampler,
-                                              cond_override=_cond_override, noise_type=s1_noise)
+                                              cond_override=_cond_override, noise_type=s1_noise,
+                                              hybrid_split=hybrid_split,
+                                              shift_policy=shift_policy, shift_stage="s1")
             else:
                 if s1_noise != "white" and s1_eta and s1_eta > 0:
                     print(f"[EricKrea2-MS]    note: s1_noise={s1_noise} has no effect with "
@@ -1195,10 +1433,11 @@ class EricKrea2MultistageUltra:
                 up2, s2_h, s2_w = upscale_between_stages(cur_lat, upscale_vae, pipe.vae, cur_h, cur_w, vsf)
             else:
                 up2 = _upscale_latents(cur_lat, cur_h, cur_w, s2_h, s2_w, vsf)
+            up2 = _renorm_hop(up2, cur_lat, upscale_renorm, "S1->S2")
             _s2_sched, _s2_label = _resolve_sched("s2", s2_steps, s2_schedule)
             cur_lat = _denoise_stage(up2, s2_h, s2_w, s2_steps, s2_cfg, s2_start_step, s2_end_step,
                                      _s2_sched, s2_noise, gen_s2, "Stage 2", s2_sampler,
-                                     sched_label=_s2_label, stage_eta=s2_eta)
+                                     sched_label=_s2_label, stage_eta=s2_eta, stage_key="s2")
             if last_stage == 2:
                 cur_lat, s2_h = _final_crop(cur_lat, s2_h, s2_w)
             cur_h, cur_w = s2_h, s2_w
@@ -1218,13 +1457,15 @@ class EricKrea2MultistageUltra:
             else:
                 cur_h3, cur_w3 = s3_h, s3_w
                 up3 = _upscale_latents(cur_lat, cur_h, cur_w, cur_h3, cur_w3, vsf)
+            up3 = _renorm_hop(up3, cur_lat, upscale_renorm, "S2->S3")
             _s3_sched, _s3_label = _resolve_sched("s3", s3_steps, s3_schedule)
             cur_lat = _denoise_stage(up3, cur_h3, cur_w3, s3_steps, s3_cfg, s3_start_step, s3_end_step,
                                      _s3_sched, s3_noise, gen_s3, "Stage 3", s3_sampler,
-                                     sched_label=_s3_label, stage_eta=s3_eta)
+                                     sched_label=_s3_label, stage_eta=s3_eta, stage_key="s3")
             cur_lat, cur_h3 = _final_crop(cur_lat, cur_h3, cur_w3)
             cur_h, cur_w = cur_h3, cur_w3
 
+        _telem.close()
         if use_final_decode:
             print(f"[EricKrea2-MS]   Final upscale-VAE decode "
                   f"({'2x then downsample to native' if final_downsample else '2x'}) ...")

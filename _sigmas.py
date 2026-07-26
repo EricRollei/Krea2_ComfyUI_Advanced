@@ -12,29 +12,33 @@ only sets step spacing; the pipeline owns the shift, so a curve authored once is
 valid at any resolution.
 
 Curves:
-  linear        - uniform spacing (composition).
-  balanced      - Karras rho=3 (moderate low-sigma detail).
-  karras        - Karras rho=7 (heavy low-sigma / fine texture).
-  beta57        - Beta(0.5, 0.7) CDF spacing (RES4LYF default).
-  beta          - Beta(alpha, beta) CDF spacing (configurable).
-  bong_tangent  - RES4LYF two-stage arctan descent (hold-then-drop).
-  exponential   - geometric spacing.
+  linear           - uniform spacing (composition).
+  balanced         - Karras rho=3 (moderate low-sigma detail).
+  karras           - Karras rho=7 (heavy low-sigma / fine texture).
+  beta57           - Beta(0.5, 0.7) CDF spacing (RES4LYF default).
+  beta             - Beta(alpha, beta) CDF spacing (configurable).
+  bong_tangent     - RES4LYF two-stage arctan descent (hold-then-drop).
+  exponential      - geometric spacing.
+  linear_quadratic - ComfyUI-core slow-linear-then-quadratic descent (Mochi
+                     lineage; the 'kreamania' finetuner pass-1 schedule).
 
 `detail_bias` (-1..+1) is the single friendly knob: it packs more sampling
 steps at low sigma (bias>0 -> fine detail) or high sigma (bias<0 -> composition).
 It applies to EVERY curve: karras/balanced fold it into the rho, bong_tangent
-into its drop slope, and the remaining curves (linear/beta/beta57/exponential)
-get an equivalent monotonic step redistribution. Explicit `rho` overrides it on
-the Karras curves.
+into its drop slope, and the remaining curves (linear/beta/beta57/exponential/
+linear_quadratic) get an equivalent monotonic step redistribution. Explicit
+`rho` overrides it on the Karras curves.
 
-Ported from RES4LYF (ClownsharkBatwing/RES4LYF) sigmas.py for beta57/bong_tangent.
+Ported from RES4LYF (ClownsharkBatwing/RES4LYF) sigmas.py for beta57/bong_tangent;
+linear_quadratic mirrors ComfyUI-core's linear_quadratic_schedule.
 """
 
 import math
 
 import numpy as np
 
-CURVES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent", "exponential"]
+CURVES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent", "exponential",
+          "linear_quadratic"]
 
 
 def _rho_from_bias(base_rho: float, bias: float, rho) -> float:
@@ -86,13 +90,43 @@ def _bong_tangent(keep, sigma_start, sigma_min, pivot_1=0.6, pivot_2=0.6,
     return sig
 
 
+def _linear_quadratic(keep, sigma_start, sigma_min, linear_frac=0.5, threshold_noise=0.025):
+    """ComfyUI-core 'linear_quadratic' schedule (Mochi lineage), scaled into
+    [sigma_min, sigma_start]. A slow linear descent through the first
+    ``linear_frac`` of the steps (dropping only to 1 - threshold_noise of the
+    range), then a quadratic tail - i.e. most of the schedule is spent at HIGH
+    sigma (composition), with a fast late drop. Construction mirrors comfy's
+    linear_quadratic_schedule (threshold_noise=0.025, linear_steps=steps//2
+    defaults) on a normalized 1..0 grid, then maps into the requested window.
+    The 'kreamania' finetuner pass-1 schedule."""
+    keep = max(1, int(keep))
+    if keep == 1:
+        return [float(sigma_start)]
+    steps = keep
+    linear_steps = max(1, min(steps - 1, int(round(steps * float(linear_frac)))))
+    tn = float(threshold_noise)
+    linear_part = [i * tn / linear_steps for i in range(linear_steps)]
+    diff = linear_steps - tn * steps
+    quadratic_steps = steps - linear_steps
+    qc = diff / (linear_steps * quadratic_steps ** 2)
+    lc = tn / linear_steps - 2 * diff / (quadratic_steps ** 2)
+    const = qc * (linear_steps ** 2)
+    quad_part = [qc * (i ** 2) + lc * i + const for i in range(linear_steps, steps)]
+    ramp = linear_part + quad_part          # ascending 0 -> ~1 over `keep` points
+    sig = [1.0 - v for v in ramp]           # descending 1 -> ~0
+    lo = min(sig[-1], sig[0])
+    span = (sig[0] - lo) or 1e-12           # renormalize exactly onto the window
+    return [sigma_min + (v - lo) / span * (sigma_start - sigma_min) for v in sig]
+
+
 def _apply_detail_warp(sig, bias):
     """Redistribute the sample points along an already-built descending sigma
     curve WITHOUT moving its endpoints. ``bias`` > 0 packs more steps at LOW sigma
     (fine detail); ``bias`` < 0 packs them at HIGH sigma (composition). This is the
     universal ``detail_bias`` for curves that have no native rho/slope knob
-    (linear / beta / beta57 / exponential) - karras/balanced fold bias into rho and
-    bong_tangent into its slope, so those are left untouched by the caller.
+    (linear / beta / beta57 / exponential / linear_quadratic) - karras/balanced fold
+    bias into rho and bong_tangent into its slope, so those are left untouched by
+    the caller.
 
     Mechanism: reinterpret ``sig`` as sigma(t) on a uniform t in [0,1], then resample
     at warped positions ``u = t**k`` with ``k = 2**bias`` (k>1 -> sample density
@@ -144,6 +178,11 @@ def build_sigmas(num_steps, denoise=1.0, curve="linear", *, bias=0.0, rho=None,
         # detail_bias nudges the drop slope (bias>0 -> steeper late drop = more detail hold early).
         s = float(slope) * (2.0 ** (max(-1.0, min(1.0, float(bias)))))
         sig = _bong_tangent(keep, sigma_start, sigma_min, pivot, pivot, s, s, middle)
+    elif curve == "linear_quadratic":
+        # comfy-core schedule (Mochi lineage); `middle` sets the linear fraction
+        # (0.5 = comfy's steps//2 default). detail_bias applies via the universal warp.
+        sig = _linear_quadratic(keep, sigma_start, sigma_min,
+                                linear_frac=float(middle) if middle else 0.5)
     elif curve == "exponential":
         sig = sigma_start * (sigma_min / sigma_start) ** t
     else:  # linear
@@ -161,7 +200,7 @@ def build_sigmas(num_steps, denoise=1.0, curve="linear", *, bias=0.0, rho=None,
     return sig.tolist()
 
 
-# ── per-stage override resolution (KREA2_SIGMAS bundle) ──────────────────────
+# -- per-stage override resolution (KREA2_SIGMAS bundle) ----------------------
 
 _STAGE_PARAM_KEYS = ("bias", "rho", "alpha", "beta", "pivot", "slope", "middle")
 

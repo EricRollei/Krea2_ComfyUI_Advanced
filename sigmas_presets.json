@@ -67,5 +67,74 @@
       "s3_beta": 0.7,
       "sigplot": null
     }
+  },
+  "4mp-lcm": {
+    "sigmas": {
+      "s1_enable": true,
+      "s1_curve": "beta57",
+      "s1_detail_bias": 0,
+      "s1_rho": 0,
+      "s1_alpha": 0.5,
+      "s1_beta": 0.7,
+      "s2_enable": true,
+      "s2_curve": "karras",
+      "s2_detail_bias": 0.4,
+      "s2_rho": 0,
+      "s2_alpha": 0.5,
+      "s2_beta": 0.7,
+      "s3_enable": true,
+      "s3_curve": "karras",
+      "s3_detail_bias": 0,
+      "s3_rho": 0,
+      "s3_alpha": 0.5,
+      "s3_beta": 0.7,
+      "sigplot": null
+    }
+  },
+  "Kreamania3-2stage-4.5mp": {
+    "sigmas": {
+      "s1_enable": true,
+      "s1_curve": "beta57",
+      "s1_detail_bias": 0.25,
+      "s1_rho": 0,
+      "s1_alpha": 0.5,
+      "s1_beta": 0.7,
+      "s2_enable": true,
+      "s2_curve": "linear",
+      "s2_detail_bias": 0,
+      "s2_rho": 0,
+      "s2_alpha": 0.5,
+      "s2_beta": 0.7,
+      "s3_enable": false,
+      "s3_curve": "linear",
+      "s3_detail_bias": 0,
+      "s3_rho": 0,
+      "s3_alpha": 0.5,
+      "s3_beta": 0.7,
+      "sigplot": ""
+    }
+  },
+  "kreamania3-2stage-8mp": {
+    "sigmas": {
+      "s1_enable": true,
+      "s1_curve": "bong_tangent",
+      "s1_detail_bias": 0,
+      "s1_rho": 0,
+      "s1_alpha": 0.5,
+      "s1_beta": 0.7,
+      "s2_enable": true,
+      "s2_curve": "linear",
+      "s2_detail_bias": 0,
+      "s2_rho": 0,
+      "s2_alpha": 0.5,
+      "s2_beta": 0.7,
+      "s3_enable": false,
+      "s3_curve": "linear",
+      "s3_detail_bias": 0,
+      "s3_rho": 0,
+      "s3_alpha": 0.5,
+      "s3_beta": 0.7,
+      "sigplot": ""
+    }
   }
 }

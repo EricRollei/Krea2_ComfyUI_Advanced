@@ -1475,21 +1475,29 @@ def _alt_param_keys(tkey: str):
     return alts
 
 
+# Every attr prefix under which a direct-merge path snapshots pristine weights.
+# unload_all_loras MUST scan all of them: until 2026-07-21 it scanned only
+# _lora_backup_, so LoKR/LoHa direct-merge deltas were never restored - they
+# stayed silently baked into the base weights until process restart.
+_BACKUP_ATTR_PREFIXES = ("_lora_backup_", "_lokr_backup_", "_loha_backup_")
+
+
 def unload_all_loras(pipe, log_prefix="[EricKrea2-LoRA]"):
     """Remove all LoRA effects from the pipeline/transformer.
 
     Two mechanisms are cleared:
       * PEFT adapters (low-rank LoRAs) via ``unload_lora_weights``;
       * sticky direct merges (``.diff``/``.diff_b`` full-weight patches and the
-        LoKR/LoHa direct fallbacks) by restoring the ``_lora_backup_<adapter>``
-        snapshots taken at load time — this prevents deltas from accumulating
+        LoKR/LoHa direct fallbacks) by restoring the snapshots taken at load
+        time under ``_lora_backup_<adapter>`` / ``_lokr_backup_<adapter>`` /
+        ``_loha_backup_<adapter>`` — this prevents deltas from accumulating
         across runs (each generate() realizes the stack fresh)."""
     transformer = getattr(pipe, "transformer", None)
 
     # 1) Restore sticky direct-merge backups (baked into base weights).
     if transformer is not None:
         backup_attrs = [a for a in list(vars(transformer).keys())
-                        if a.startswith("_lora_backup_")]
+                        if a.startswith(_BACKUP_ATTR_PREFIXES)]
         restored = 0
         if backup_attrs:
             params = dict(transformer.named_parameters())
@@ -1517,7 +1525,7 @@ def unload_all_loras(pipe, log_prefix="[EricKrea2-LoRA]"):
                     # so the leak is visible instead of silent.
                     setattr(transformer, attr, missed)
                     print(f"{log_prefix} WARNING: {len(missed)} direct-merged "
-                          f"param(s) from adapter '{attr[len('_lora_backup_'):]}' "
+                          f"param(s) from adapter '{attr.split('_backup_', 1)[-1]}' "
                           "could not be restored (parameter renamed?) - backup "
                           "KEPT, deltas may still be baked in. Sample: "
                           f"{sorted(missed)[:3]}")
@@ -1543,6 +1551,29 @@ def unload_all_loras(pipe, log_prefix="[EricKrea2-LoRA]"):
         print(f"{log_prefix} unloaded all LoRA adapters")
     except Exception as e:
         print(f"{log_prefix} unload note: {e}")
+
+
+def assert_clean_baseline(pipe, log_prefix="[EricKrea2-LoRA]"):
+    """Loud residue check for the start of a stackless run: after
+    ``unload_all_loras`` the pipe is EXPECTED to carry no LoRA effects. Prints
+    ONLY when residue survives - leftover backup attrs mean direct-merged
+    deltas are still baked into the base weights; live PEFT layers mean
+    adapters did not detach. Quiet on a clean pipe (the normal case)."""
+    transformer = getattr(pipe, "transformer", None)
+    if transformer is None:
+        return
+    leftover = [a for a in vars(transformer)
+                if a.startswith(_BACKUP_ATTR_PREFIXES)]
+    if leftover:
+        print(f"{log_prefix} RESIDUE: {len(leftover)} unrestored direct-merge "
+              f"backup set(s) still on the transformer {leftover[:3]} - baked "
+              "deltas are STILL ACTIVE in this run's base weights! A restart is "
+              "the only certain cleanup until the restore succeeds.")
+    live = _live_lora_layer_count(transformer)
+    if live:
+        print(f"{log_prefix} RESIDUE: {live} transformer module(s) still carry "
+              "live LoRA layers after unload - adapters did not detach cleanly "
+              "and are STILL ACTIVE in this run!")
 
 
 def _registered_adapters(pipe):

@@ -47,6 +47,27 @@ No dependency on any other node pack.
 
 ## What's New
 
+**Late July 2026 - parameter sweeps, hybrid samplers, inter-stage renorm.**
+
+- **Parameter sweep system** - wire an `Eric Krea2 Sweep Plan` into Ultra V2's
+  new `sweep` input and one queue item runs a whole grid (or explicit combo
+  list) of sampler / scheduler / steps / window / eta / noise / mu / cfg /
+  megapixels settings against a fixed seed: per-cell PNGs with full embedded
+  recipes, a labeled contact sheet, `sweep_summary.csv`, a JSON manifest,
+  automatic S1-latent reuse for s2/s3-only cells, and one-click promotion of a
+  winning cell to a preset. See [Parameter sweeps](#parameter-sweeps).
+- **`lcm_hybrid` / `lcm_hybrid2` samplers + `hybrid_split`** - lcm full-churn
+  entry (launders upscale damage) handing off to a trajectory-faithful tail
+  (`deis_3m` / `res_2m`) at a selectable fraction of the window.
+- **`upscale_renorm`** - repairs the latent variance each upscale hop drains
+  (variance is contrast/saturation), stopping the progressive flattening of
+  multi-hop runs. `per_channel` recommended.
+- **Sweep v2: LoRA, prompt & sigma-profile axes** - bake a whole style-LoRA
+  library off against the bare checkpoint (or layered on your stack), ladder
+  one stack entry through strengths, cross everything with a prompt list and
+  with saved sigma-shape presets - all in one queue item, all standalone-
+  reproducible per cell.
+
 **July 2026 - multi-stage sampling, presets & img2img toolkit.**
 
 - **Custom flow-matching samplers** - `res_2m`, `res_2s`, `deis_3m`, `deis_4m`
@@ -146,8 +167,18 @@ with group **bypass** (Ctrl+B) instead of juggling separate workflows. See
 *The Sigmas node: per-stage curve / `detail_bias` / Beta α-β overrides with a live sigma preview per stage (solid = steps that run, ring = re-noise level, ghost = full schedule).*
 
 Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
-`deis_4m`. Schedules: `linear`, `balanced`, `karras`, `beta57`, `beta`,
+`deis_4m`, `rk6_7s`, `abnorsett_4m`, `lcm`, `lcm_hybrid`, `lcm_hybrid2`.
+Schedules: `linear`, `balanced`, `karras`, `beta57`, `beta`,
 `bong_tangent`, `exponential`. See [Samplers & schedules](#samplers--schedules).
+
+### Sweeping & characterization
+
+- **Eric Krea2 Sweep Plan** - builds a `KREA2_SWEEP` plan (grid axes or
+  JSON-lines combos, stage scoping, quick-screen mode, output folder, hard
+  combo cap). Wire into Ultra V2's `sweep` input.
+- **Eric Krea2 Sweep → Preset** - promotes any cell of a finished sweep's
+  manifest into `ultra_presets.json`, tagged with the checkpoint name.
+See [Parameter sweeps](#parameter-sweeps).
 
 ### img2img, resolution & latents
 
@@ -205,24 +236,37 @@ Each stage of the Multi-Stage Ultra node picks a **sampler** (the ODE solver) an
 
 | Sampler | Order | Model calls / step | Best for |
 |---------|-------|--------------------|----------|
-| `euler` | 1 | 1 | Baseline / A-B tests. Always runs to σ=0 (ignores a noisy early stop). |
+| `euler` | 1 | 1 | Baseline / native parity (the comfy euler+simple twin). Honours early stop and eta (runs as a 1-stage RK). |
 | `res_2m` | 2 (multistep) | 1 | General use - sharper than Euler at the same cost. |
 | `res_2s` | 2 (single-step) | 2 | Low step counts / Stage-1 draft. Self-starting; ~2× slower. |
 | `deis_3m` | 3 (multistep) | 1 | Smooth refine passes. |
 | `deis_4m` | 4 (multistep) | 1 | Smoothest refine at higher step counts. |
+| `rk6_7s` | ~6 (7-stage RK) | 7 | Maximum solver accuracy (finetuner recipes; the Raw model). ~7x cost per step - overkill for Turbo daily use. |
+| `abnorsett_4m` | 4 (exp. multistep) | 1 | Recipe-name alias of `deis_4m` - identical update in this solver formulation. |
+| `lcm` | ancestral | 1 | Post-upscale refine windows: jumps to x0 and fully re-noises every step, laundering upscale artifacts. Not for Stage 1. |
 
-All non-Euler solvers honour a *noisy early-stop* (`end_step < steps`), letting a
-stage hand a partially-denoised latent to the next, and support the ancestral
-`eta` SDE path. The math is recreated from the RES (arXiv:2308.02157) and DEIS
-(arXiv:2204.13902) papers - no external solver code is imported.
+Every sampler honours a *noisy early-stop* (`end_step < steps`), letting a stage
+hand a partially-denoised latent to the next, and supports the ancestral `eta`
+SDE path (`lcm` is inherently fully ancestral - see below). Since the 2026-07-22
+shift-consistency fix, `euler` runs through the same solver path as every other
+sampler (as a 1-stage Runge-Kutta), so the re-noise level and the stepping always
+share one sigma space. The math is recreated from the RES (arXiv:2308.02157) and
+DEIS (arXiv:2204.13902) papers plus standard Butcher tableaus - no external
+solver code is imported.
 
 **Schedules:** `linear`, `balanced`, `karras`, `beta57`, `beta`, `bong_tangent`,
+`linear_quadratic` (ComfyUI-core slow-linear-then-quadratic descent; the kreamania pass-1 schedule),
 `exponential`. The **Sigmas** node adds a `detail_bias` knob (biases sigma spacing
 toward fine detail vs. large structure) and Beta α/β shaping.
 
 **Recommended pairings** (per the RES4LYF community):
 - **Stage 1 (draft):** `res_2s` + `beta57`.
 - **Stage 2/3 (refine):** `deis_3m` or `deis_4m` + `bong_tangent`.
+- **Post-upscale laundering (native-parity chains):** `lcm` + `linear` with a deep window - see below.
+
+Native parity note: `linear` + `distilled_shift=fixed` reproduces ComfyUI's
+`euler`/`simple` spacing exactly (same uniform grid, same exponential mu=1.15
+shift) - that pairing IS the native baseline, not an approximation of it.
 
 ### Choosing a sampler per stage: warmup & accuracy
 
@@ -282,6 +326,103 @@ Rules of thumb: **from noise → self-starting (`res_2s`)**; **from clean + many
 → multistep (`deis_3m`/`4m`)**; **from clean + few steps → back to `res_2s`** (no
 warmup to waste). `deis_4m` only over `deis_3m` on long, smooth, high-step runs; it's
 more prone to overshoot on short or noisy-early-stop stages.
+
+### Trajectory vs churn: where `lcm` fits
+
+Every sampler answers the same question - "given where the latent is and how noisy
+it should be, where does it go next?" - and they split into two philosophies.
+
+**The ODE family** (`euler`, `res_2m`, `res_2s`, `deis_*`, `rk6_7s`) treats
+denoising as following a *trajectory*. Each step nudges the current latent along
+the flow, so information accumulates: real structure, but also upscale ridges,
+interpolation error, and leftover mottling get carried forward, refined, and
+sharpened into the output. The members differ only in how accurately they follow
+the path (euler crudely, rk6_7s obsessively). Faithful is their virtue and their
+flaw: they preserve everything, including what you wish they would not.
+
+**`lcm` is the other philosophy.** Each step asks the model for its best guess of
+the finished image (the x0 prediction), then throws the current latent away and
+rebuilds the next one as that guess plus fresh noise at the next sigma (the
+flow-matching mix `(1 - sigma) * x0 + sigma * noise`). No trajectory, no memory:
+whatever damage the latent carried - contour lines from a latent upscale, seam
+echo, mismatch residue - is discarded every step and replaced by the model's own
+clean prior plus new noise. That is why it launders artifacts that deterministic
+ODE samplers faithfully integrate. The price is symmetric: it also discards fine
+detail the trajectory was carrying, drifts more from the init, and shows larger
+seed-to-seed variety.
+
+**The choice rule:** damaged starting latent you want repaired -> `lcm`. Precious
+starting latent you want preserved -> an ODE sampler. In between - trajectory with
+some laundering - is exactly what `eta > 0` on the res/deis samplers is.
+
+Concretely: post-upscale refine windows are lcm home turf (the latent just got
+stretched and is full of interpolation artifacts - the entire secret of the
+native euler -> lcm two-pass chains). Stage 1 is ODE territory: you are building
+structure from noise and want it followed faithfully, and Turbo is TDM-distilled,
+not LCM-distilled, so full-ancestral from pure noise reads rough and unstable.
+A same-resolution polish on an already-good image is a judgment call: shallow lcm
+freshens texture and kills residue; shallow deis/res preserves likeness.
+
+**What shapes lcm's churn** (it consumes fresh noise every step, so it is the
+sampler most sensitive to what that noise is):
+
+- **Window depth** (`start_step`/`end_step`): how much of the image gets rebuilt.
+  Deeper start = more repair, more drift.
+- **Step count**: number of churn events across the same sigma range - more steps
+  = finer-grained laundering.
+- **Schedule curve + `detail_bias`** (Sigmas node): where the re-noise ladder
+  concentrates. Positive bias packs churn events at low sigma (texture polish);
+  negative packs them high (structural repair).
+- **`distilled_shift` / mu**: moves the whole ladder (higher mu = more time spent
+  churning at high sigma = smoother, deeper repaint).
+- **`noise_type` and `eta`**: lcm-family re-noise draws are ALWAYS plain seeded
+  white - the model was trained on white noise at every sigma, and a FULL
+  replacement with colored noise is out-of-distribution (it decodes as
+  chromatic blotches over the image). `noise_type` shaping applies only to the
+  fractional SDE churn of the res/deis/rk samplers at `eta > 0`. For
+  colored-noise grain character, use `deis_3m`/`res_2m` with eta 0.5-1.0 and a
+  `noise_type` - not lcm.
+- **Per-stage seed** (`seed_mode`): lcm windows show more seed variety than the
+  deterministic solvers - that is the churn, not a defect.
+
+**Recommended lcm refine baseline** (the native-parity chain):
+
+- **S2:** 12 steps, window 6 -> 12 (6 denoise steps), `lcm` + `linear`,
+  `distilled_shift=fixed`, eta 0, white noise; `upscale_to_stage2` ~1.2 (area),
+  S1->S2 VAE upscale OFF (plain latent hop).
+- **S3:** 12 steps, window 5 -> 12, otherwise identical; `upscale_to_stage3` ~1.5.
+- Artifacts surviving the window -> start deeper (5 or 4). Likeness drifting ->
+  start shallower (7-8). Want extra texture -> `detail_bias` +0.2..+0.3.
+- Keep lcm off Stage 1 (see above).
+
+### The lcm hybrids & `hybrid_split`
+
+Pure `lcm`'s weakness is that its final detail is bounded by the x0 prediction
+at the entry (highest-sigma) steps: the first full re-noise discards the
+incoming trajectory - including the previous stage's real detail - and later
+steps only polish that re-invention. The hybrids keep lcm's artifact
+laundering where it works (the entry steps, where upscale damage lives) and
+then develop detail trajectory-faithfully at low sigma, where detail is
+actually made:
+
+- **`lcm_hybrid`** - lcm churn, then a `deis_3m` tail.
+- **`lcm_hybrid2`** - lcm churn, then a `res_2m` tail (added 2026-07-25;
+  res_2m has been testing better than deis_3m as the detail-development half
+  on several fine tunes - both tails cost the same per step).
+- **`hybrid_split`** (Ultra widget, 0.05-0.95, default 0.5) - the handoff
+  point as a fraction of the stage's window. Lower = more trajectory-faithful
+  detail; higher = more laundering. 0.5 reproduces the original behavior
+  (odd counts give the churn half the extra step). Ignored by every other
+  sampler; sweepable via combos JSON (`{"hybrid_split": 0.33}`).
+- `eta`/`noise_type` apply to the tail half only; the lcm half is inherently
+  fully ancestral and always re-noises with plain seeded white (colored
+  noise as a full replacement is out-of-distribution -> rainbow blotches).
+- `eta` contract: honoured by `res_2m`/`res_2s`/`deis_3m`/`deis_4m`/
+  `abnorsett_4m`/`rk6_7s` and the hybrid tails; **ignored by `euler` and
+  `lcm`** (euler is the deterministic baseline - enforced in the dispatch,
+  and the Sweep Plan automatically drops cells that differ only by inert
+  eta/noise on those samplers).
+
 
 ## img2img
 
@@ -458,6 +599,21 @@ resolution gain. `blur_sigma=0` is a good default (Lanczos already anti-aliases)
 it only as a taste knob. Inter-stage (S2→S3) downsampling reads the mode flags, not the
 loader boolean.
 
+## Inter-stage renorm (`upscale_renorm`)
+
+Latent interpolation is a lowpass: every upscale hop shrinks latent variance,
+and decoded variance *is* contrast/saturation - so multi-hop runs compound a
+little drain per hop into progressive flattening and desaturation.
+`upscale_renorm` repairs the statistics right after each hop:
+
+- **`per_channel`** (recommended) - re-match each latent channel's mean/std to
+  the pre-hop latent; strongest color + contrast hold.
+- **`global`** - overall mean/std only.
+- **`off`** - previous behavior.
+
+A telemetry line prints latent std pre-hop / post-hop / post-renorm in every
+mode, so the drain (and the repair) is measurable per run.
+
 ## Turbo guidance & the negative prompt
 
 Turbo is distilled for guidance 0, so most wrappers give you no CFG - and therefore no
@@ -482,6 +638,91 @@ it needs) is allowed on a distilled model:
 
 Using a real negative prompt on a distilled/Turbo checkpoint at all is unusual - most
 Turbo pipelines simply can't feed one.
+
+## Parameter sweeps
+
+A fine tune's preferred sampler, scheduler, step count, mu and cfg tolerance
+are all proxies for one variable - how far its training eroded the turbo
+distillation. The sweep system turns that from folklore into measurement:
+characterize a model in one queue item, keep the evidence, promote the
+winners to presets.
+
+**Wiring:** `Eric Krea2 Sweep Plan` → Ultra V2's `sweep` input (last socket).
+The Ultra panel is the *base recipe*; each cell overrides only its swept keys.
+All existing machinery (LoRA stack, cond rebalance, ref latents, telemetry,
+renorm) runs untouched per cell.
+
+**Grid mode:** fill any of the axis fields - `samplers`, `schedulers`
+(`pair_lock` zips them into fixed pairs), `steps`, `windows` (`5-12` →
+start/end step), `etas`, `noise_types`, `cfgs`, `shift_modes`/`mus`,
+`megapixels` - blank = not swept (panel value used). Full cross product,
+hard-refused over `max_combos` with an axis-size breakdown. Cells that differ
+only by inert knobs (eta/noise on `euler`/`lcm`) are deduped automatically.
+
+**Combos mode:** one JSON object per line in `combos_json`, or a file via
+`combos_file` (JSON array, `{"combos": [...]}`, or JSON-lines) - keys are the
+same widget keys as presets and PNG recipes, so combos are copy-pasteable
+from any stamped image. Sweep campaigns become versionable files.
+
+**Workflow intent:** `quick_screen` forces S1-only at `screen_megapixels` for
+cheap wide grids - perfect Stage 1 first, then sweep `stage_scope=s2`/`s3`
+refinement on the short list. For s2/s3-only sweeps the post-S1 latent is
+computed once and **reused** across cells (`s1_reused` in the manifest;
+automatically disabled per cell for anything that changes Stage 1, and
+globally under `seed_mode=same_all_stages`).
+
+**Outputs** (to `output/sweeps/<timestamp>_<finetune>/`, or `output_folder`):
+- `cell_NNN_<values>.png` - every cell at full res with the complete resolved
+  recipe (`ultra` + `loader` + `lora` sections) embedded in a
+  `krea2_settings` chunk - each file is standalone-reproducible.
+- `contact_sheet.png` - downscaled overview (`tile_px` tiles), captions show
+  only the diffs vs base, green line = per-cell generation time + scores.
+- `sweep_summary.csv` - one row per cell: swept columns, `gen_time_s`,
+  rounded scores - sortable in any spreadsheet.
+- `sweep_manifest.json` - full resolved recipes, timings, metrics, errors.
+
+**Scores** (optional, CPU, milliseconds - failure detectors, not beauty
+judges): Laplacian + Tenengrad sharpness (disagreement flags oversharpening),
+wavelet noise sigma, flat-region chroma variance (splotch/turbo-residue
+detector), clip fraction. `sort_by` pre-sorts the sheet; scores never hide a
+cell - the eye stays the judge.
+
+**Promotion:** `Eric Krea2 Sweep → Preset` reads a manifest cell into
+`ultra_presets.json` (swept keys only, or the full recipe), auto-tagged with
+the checkpoint name and an `objective` note - per-fine-tune preset libraries
+by construction.
+
+**LoRA, prompt & sigma-profile axes (sweep v2):**
+
+- **LoRA bake-off** (`lora_mode=bakeoff`) - one LoRA per line in
+  `lora_files` (loras-folder names or full paths) x `lora_strengths`
+  (one value drives all three stage weights). Default: each swept LoRA runs
+  ALONE, so every style is measured against the bare checkpoint on equal
+  footing; `keep_panel_stack` layers it on top of your declared stack
+  instead. `include_baseline` adds the reference cell (no-LoRA, or the
+  panel stack alone when layering). Sweep-injected entries are ephemeral -
+  fused per cell, cleaned per cell, nothing persists.
+- **Strength ladder** (`lora_mode=strength_ladder`) - keeps the
+  panel-declared stack and steps only the `lora_target` entry (1-based
+  index, or a name substring) through `lora_strengths`.
+- **Prompt axis** - one prompt per line in `prompts`; each prompt cell
+  re-encodes (conditioning cleared automatically, ~seconds/cell). Prompts
+  expand as the SLOWEST axis, so the contact sheet and CSV read in
+  prompt-major blocks - metric comparisons are only meaningful within a
+  block.
+- **Sigma-profile axis** - `sigma_profiles` takes saved ★ preset NAMES from
+  the Eric Krea2 Sigmas node (validated at plan time); each cell rebuilds
+  the full bundle from that preset, overriding any wired sigmas node for
+  that cell.
+
+All v2 axes cross with every classic axis, in grid mode AND on top of
+explicit combos, under the same cap and dedupe rules. LoRA/prompt/profile
+cells always run a full Stage 1 (S1-latent reuse correctly sits out). Each
+cell PNG records the ACTUAL stack, bundle, and prompt that cell ran - not
+the panel's - so every file stays a complete standalone recipe.
+
+Failed cells never kill a sweep (red tile + manifest error), and interrupts
+finalize the files on disk before stopping the queue item.
 
 ## Notes
 

@@ -102,6 +102,18 @@ class EricKrea2VisionPrompt:
                 "print_prompt": ("BOOLEAN", {"default": True,
                     "tooltip": "Print the assembled prompt text + token/image-grid shapes to the console. "
                                "Turn this on for your first test of this node."}),
+                "vision_template": (["picture_n", "bare_edit"], {"default": "picture_n",
+                    "tooltip": "How the vision blocks are labeled inside the user turn - match the LoRA's "
+                               "training.\n"
+                               "picture_n: 'Picture 1: <vision>' markers - matches ai-toolkit REFERENCE "
+                               "training (ostris lineage, e.g. Style Reference LoRA; pair with the "
+                               "Reference Latents node's ostris_t0 recipe at ~0.15 MP here).\n"
+                               "bare_edit: bare vision blocks, no labels - matches the identity/instruction "
+                               "EDIT lineage's grounded encode (predict_velocity_edit; pair with the "
+                               "edit_frame recipe). Those LoRAs train the VLM view at ~384-768px, so "
+                               "vision_megapixels ~0.30-0.45 is in-distribution here. For CFG > 1 edits "
+                               "(Raw removals), ground the negative the same way: this node with an EMPTY "
+                               "prompt and the same image."}),
             },
         }
 
@@ -123,7 +135,7 @@ class EricKrea2VisionPrompt:
     def encode(self, krea2_pipeline, prompt, image1=None, image2=None, image3=None,
                vision_position="before prompt", vision_megapixels=1.0,
                vision_processor_source=r"H:\Testing\Qwen3-VL-4B-Instruct-heretic-7refusal",
-               max_sequence_length=512, print_prompt=True):
+               max_sequence_length=512, print_prompt=True, vision_template="picture_n"):
         pipe = krea2_pipeline["pipeline"]
         if pipe is None:
             from .krea2_multistage_ultra import EricKrea2MultistageUltra
@@ -170,12 +182,16 @@ class EricKrea2VisionPrompt:
         pixel_values = img_inputs["pixel_values"].to(device=device, dtype=pipe.text_encoder.dtype)
         image_grid_thw = img_inputs["image_grid_thw"].to(device)
 
-        # ── 3) build the "Picture N: <image>" placeholder text (ethanfel's convention) ──
+        # ── 3) build the vision placeholder text - labeled ("Picture N:", reference
+        #        lineage) or bare (edit lineage), per vision_template ──
         image_token = "<|image_pad|>"
         vision_start, vision_end = "<|vision_start|>", "<|vision_end|>"
         image_prompt = ""
         for slot in range(len(pil_images)):
-            image_prompt += f"Picture {slot + 1}: {vision_start}{image_token}{vision_end}"
+            if vision_template == "bare_edit":
+                image_prompt += f"{vision_start}{image_token}{vision_end}"
+            else:
+                image_prompt += f"Picture {slot + 1}: {vision_start}{image_token}{vision_end}"
         user_text = (prompt + image_prompt) if vision_position == "after prompt" else (image_prompt + prompt)
 
         # ── 4) expand each <|image_pad|> into the right count of repeats -

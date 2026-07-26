@@ -12,7 +12,7 @@ saved shape works on any run).
 Per stage (s1/s2/s3):
   * enable       - when off, that stage falls back to the Ultra node's own
                    schedule dropdown (mix authored + panel stages freely).
-  * curve        - linear / balanced / karras / beta57 / beta / bong_tangent /
+  * curve        - linear / balanced / karras / beta57 / beta / bong_tangent / linear_quadratic /
                    exponential (same library the Ultra dropdowns use).
   * detail_bias  - the single friendly knob (-1..+1). >0 packs more steps at low
                    sigma (fine detail); <0 favours high sigma (composition). Works

@@ -5,6 +5,9 @@
 # Local History extension snapshots (VS Code) - never publish these
 .history/
 
+# Local pre-change source snapshots (redundant with git history)
+docs/backup/
+
 # Python bytecode / caches
 __pycache__/
 *.py[cod]

@@ -66,10 +66,26 @@ class EricKrea2RefLatents:
                                "mostly just bounds the encode-time VAE cost/detail ceiling, not the "
                                "final grid size actually used. Each 1 MP ref adds ~2048 tokens to every "
                                "denoise step, so 2-3 refs at 1 MP is slow."}),
+                "edit_recipe": (["ostris_t0", "edit_frame"], {"default": "ostris_t0",
+                    "tooltip": "Which trained reference mechanism to run - the LoRA and the recipe "
+                               "MUST match (a LoRA under the wrong recipe = the classic 'never as good "
+                               "as the author's examples' failure).\n"
+                               "ostris_t0: refs appended at their own grid with t=0 modulation - for "
+                               "style/reference LoRAs (ai-toolkit reference method, e.g. Krea 2 Style "
+                               "Reference). Pair with Vision Prompt template picture_n at ~0.15 MP.\n"
+                               "edit_frame: source prepended on the target grid, shared timestep - for "
+                               "identity/instruction edit LoRAs (ai-toolkit predict_velocity_edit, e.g. "
+                               "Krea 2 Identity Edit at strength 1.0). The Ultra node pixel-fits and "
+                               "re-encodes the source at its resolved Stage 1 size automatically "
+                               "(match your target aspect ratio to the source; trained <=2MP, so it "
+                               "conditions Stage 1 only in a multistage run). Pair with Vision Prompt "
+                               "template bare_edit at ~0.30-0.45 MP. Turbo/CFG-1 for most edits; "
+                               "removals need Raw at CFG ~3 with an EMPTY negative prompt."}),
             },
         }
 
-    def encode(self, krea2_pipeline, image1, image2=None, image3=None, max_ref_megapixels=0.25):
+    def encode(self, krea2_pipeline, image1, image2=None, image3=None, max_ref_megapixels=0.25,
+               edit_recipe="ostris_t0"):
         pipe = krea2_pipeline["pipeline"]
         if pipe is None:
             from .krea2_multistage_ultra import EricKrea2MultistageUltra
@@ -77,6 +93,12 @@ class EricKrea2RefLatents:
         from .._ref_latents import prepare_ref_bundle
         images = [im for im in (image1, image2, image3) if im is not None]
         bundle = prepare_ref_bundle(pipe, images, max_megapixels=float(max_ref_megapixels))
+        bundle["recipe"] = str(edit_recipe or "ostris_t0")
+        if bundle["recipe"] == "edit_frame":
+            # Keep the raw images so the Ultra node can pixel-fit + re-encode the
+            # source at its resolved Stage 1 size (the blur-proof path) - the
+            # cap-encoded latents above are only a fallback for this recipe.
+            bundle["images"] = [im[:1].detach().to("cpu") for im in images]
         return (bundle,)
 
 

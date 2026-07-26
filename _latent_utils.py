@@ -97,10 +97,32 @@ def standard_decode(pipe, packed: torch.Tensor, height: int, width: int,
     # Wan-family VAE leaves a boundary artifact (a noisy band at the bottom edge);
     # tiling with overlap + cosine seam-blending matches ComfyUI's behaviour and
     # removes it. Small images decode in one shot.
-    tiled = (lat.shape[-2] > 128 or lat.shape[-1] > 128) and hasattr(vae, "enable_tiling")
+    _tmode = str(getattr(vae, "_eric_tiling", "auto") or "auto").lower()
+    _big = lat.shape[-2] > 128 or lat.shape[-1] > 128
+    if _tmode == "off":
+        tiled = False
+        if _big:
+            print(f"[EricKrea2] standard_decode: tiling FORCED OFF (loader setting) on a large "
+                  f"latent {lat.shape[-2]}x{lat.shape[-1]} - diagnostic mode: watch for the "
+                  f"bottom-edge band and VRAM spikes.")
+    else:
+        tiled = (_big or _tmode == "force") and hasattr(vae, "enable_tiling")
     if tiled:
         try:
-            vae.enable_tiling()
+            _tpx = int(getattr(vae, "_eric_tile_px", 0) or 0)
+            if _tpx >= 256:
+                try:
+                    vae.enable_tiling(tile_sample_min_height=_tpx, tile_sample_min_width=_tpx,
+                                      tile_sample_stride_height=int(_tpx * 0.75),
+                                      tile_sample_stride_width=int(_tpx * 0.75))
+                    print(f"[EricKrea2] standard_decode: custom tile {_tpx}px, "
+                          f"stride {int(_tpx * 0.75)}px")
+                except TypeError:
+                    vae.enable_tiling()
+                    print("[EricKrea2] standard_decode: this VAE enable_tiling() does not "
+                          "accept custom sizes; using its defaults")
+            else:
+                vae.enable_tiling()
             try:
                 from ._upscale_vae import patch_cosine_blend_vae
                 patch_cosine_blend_vae(vae)
@@ -180,7 +202,11 @@ def standard_encode(pipe, image: torch.Tensor, encode_vae=None):
     # Tile large encodes, symmetric with standard_decode's >128-latent rule, to avoid
     # the same boundary artifacts a single big non-tiled pass can leave.
     lat_h, lat_w = tgt_h // 8, tgt_w // 8
-    tiled = (lat_h > 128 or lat_w > 128) and hasattr(vae, "enable_tiling")
+    _tmode = str(getattr(vae, "_eric_tiling", "auto") or "auto").lower()
+    if _tmode == "off":
+        tiled = False
+    else:
+        tiled = ((lat_h > 128 or lat_w > 128) or _tmode == "force") and hasattr(vae, "enable_tiling")
     if tiled:
         try:
             vae.enable_tiling()

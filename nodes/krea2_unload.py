@@ -152,6 +152,14 @@ class EricKrea2UnloadModels:
         #    reference too, not just our local kwarg copy.
         if isinstance(krea2_pipeline, dict) and krea2_pipeline.get("pipeline") is not None:
             pipe = krea2_pipeline["pipeline"]
+            # Restore pristine base weights BEFORE dropping the object: if any
+            # reference survives teardown (cache-clear failure, external holder),
+            # it must not carry baked LoRA deltas into a reuse (2026-07-21).
+            try:
+                from .._lora_utils import unload_all_loras
+                unload_all_loras(pipe, log_prefix="[EricKrea2-Unload]")
+            except Exception as e:
+                log(f"lora restore before teardown failed: {e}")
             if verbose:
                 # 3 baseline refs are expected here: this local var, the frame's fast-locals
                 # copy getrefcount takes as its own arg, and the dict entry we're about to
