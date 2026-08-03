@@ -42,7 +42,8 @@ METRIC_KEYS = ("sharpness_laplacian", "sharpness_tenengrad", "noise_sigma",
 # Direction for "best-first" sorting per metric (True = higher is better).
 METRIC_HIGHER_BETTER = {"sharpness_laplacian": True, "sharpness_tenengrad": True,
                         "noise_sigma": False, "flat_chroma_var": False,
-                        "clip_fraction": False, "time_s": False}
+                        "clip_fraction": False, "time_s": False,
+                        "uniqueness": True}
 
 
 # ── metrics (numpy only; no torch / skimage / model loads) ───────────────────
@@ -136,6 +137,61 @@ def expand_grid(axes: dict) -> list:
     return combos
 
 
+def short_label(overrides: dict) -> str:
+    """Contact-sheet caption: stage-grouped shorthand, one line per stage.
+
+    Eric's spec (2026-07-29): 's1: 2.5mp res_2m+beta57 h7' style - sampler and
+    schedule joined with '+', compact unit suffixes, stages without swept keys
+    omitted, non-stage keys on their own trailing line."""
+    st_tok = {"s1": {}, "s2": {}, "s3": {}}
+    rest = []
+    for k in sorted(overrides.keys()):
+        if str(k).startswith("_") and k != "_seed":
+            continue
+        v = overrides[k]
+        vs = f"{v:g}" if isinstance(v, float) else str(v)
+        st = k[:2] if k[:3] in ("s1_", "s2_", "s3_") else None
+        if st:
+            st_tok[st][k[3:]] = vs
+        elif k == "_seed":
+            rest.append(f"seed {vs}")
+        elif k == "sigma_profile":
+            rest.append(f"\u2605{vs}")
+        elif k == "prompt":
+            rest.append("prompt: " + (vs[:34] + "\u2026" if len(vs) > 35 else vs))
+        else:
+            rest.append(f"{k}={vs}")
+    lines = []
+    for st in ("s1", "s2", "s3"):
+        t = st_tok[st]
+        if not t:
+            continue
+        bits = []
+        if "megapixels" in t:
+            bits.append(t.pop("megapixels") + "mp")
+        sam, sch = t.pop("sampler", None), t.pop("schedule", None)
+        if sam or sch:
+            bits.append("+".join(x for x in (sam, sch) if x))
+        if "steps" in t:
+            bits.append(t.pop("steps") + "st")
+        if "start_step" in t or "end_step" in t:
+            bits.append(f"w{t.pop('start_step', '?')}-{t.pop('end_step', '?')}")
+        if "hybrid_steps" in t:
+            bits.append("h" + t.pop("hybrid_steps"))
+        if "eta" in t:
+            bits.append("e" + t.pop("eta"))
+        if "cfg" in t:
+            bits.append("cfg" + t.pop("cfg"))
+        if "noise" in t:
+            bits.append(t.pop("noise"))
+        for k2, v2 in t.items():
+            bits.append(f"{k2}={v2}")
+        lines.append(f"{st}: " + " ".join(bits))
+    if rest:
+        lines.append("  ".join(rest))
+    return chr(10).join(lines) if lines else "(base)"
+
+
 def diff_label(overrides: dict) -> str:
     """Human caption for a cell: the swept keys only, compactly."""
     parts = []
@@ -199,11 +255,13 @@ def render_contact_sheet(cells: list, tile_px: int, header: str) -> np.ndarray:
             u8 = np.clip(np.asarray(im, dtype=np.float32) * 255.0 + 0.5, 0, 255).astype(np.uint8)
             t = Image.fromarray(u8)
             t.thumbnail((tile_px, tile_px * 4), Image.LANCZOS)
-        cap_lines = _wrap(c.get("caption", ""), probe, font, tile_px - 8)
-        note = c.get("note", "")
-        tiles.append((t, cap_lines, note))
+        cap_lines = []
+        for para in str(c.get("caption", "")).split(chr(10)):
+            cap_lines += _wrap(para, probe, font, tile_px - 8)
+        note_lines = _wrap(c.get("note", ""), probe, font, tile_px - 8)
+        tiles.append((t, cap_lines, note_lines))
 
-    cap_h = (max(len(cl) for _, cl, _ in tiles) + 1) * lh + 10
+    cap_h = max(len(cl) + len(nl) for _, cl, nl in tiles) * lh + 10
     tile_h = max(t.height for t, _, _ in tiles)
     head_h = lh + 14
     W = cols * (tile_px + 8) + 8
@@ -211,7 +269,7 @@ def render_contact_sheet(cells: list, tile_px: int, header: str) -> np.ndarray:
     sheet = Image.new("RGB", (W, H), (16, 16, 18))
     d = ImageDraw.Draw(sheet)
     d.text((8, 6), header, fill=(230, 230, 230), font=hfont)
-    for i, (t, cap_lines, note) in enumerate(tiles):
+    for i, (t, cap_lines, note_lines) in enumerate(tiles):
         r, cc = divmod(i, cols)
         x = 8 + cc * (tile_px + 8) + (tile_px - t.width) // 2
         y = head_h + 8 + r * (tile_h + cap_h + 8)
@@ -220,8 +278,8 @@ def render_contact_sheet(cells: list, tile_px: int, header: str) -> np.ndarray:
         tx = 8 + cc * (tile_px + 8)
         for j, ln in enumerate(cap_lines):
             d.text((tx + 2, ty + j * lh), ln, fill=(210, 210, 210), font=font)
-        if note:
-            d.text((tx + 2, ty + len(cap_lines) * lh), note,
+        for nn, note in enumerate(note_lines):
+            d.text((tx + 2, ty + (len(cap_lines) + nn) * lh), note,
                    fill=(150, 200, 150), font=font)
     return np.asarray(sheet, dtype=np.float32) / 255.0
 
@@ -324,6 +382,39 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
             cells.append(None)
         results.append(rec)
 
+    # Composition uniqueness (model-free): mean absolute difference between
+    # cells' 64x64 luma thumbnails, grouped per prompt block (cross-prompt
+    # distances are meaningless - different prompts differ by construction).
+    # With the sweep's fixed seed, this distance IS composition divergence.
+    # Fixed-size thumbs keep mixed-resolution cells (megapixels axis)
+    # comparable. Score is 0-100-ish; higher = more unlike its group.
+    ok_idx = [j for j, r in enumerate(results)
+              if "error" not in r and j < len(cells) and cells[j] is not None]
+    if len(ok_idx) >= 2:
+        thumbs = {}
+        for j in ok_idx:
+            im = cells[j]
+            h, w0 = im.shape[:2]
+            ys = (np.linspace(0, h - 1, 64)).astype(int)
+            xs = (np.linspace(0, w0 - 1, 64)).astype(int)
+            thumbs[j] = _luma(im[ys][:, xs])
+        u_groups = {}
+        for j in ok_idx:
+            _ov = results[j].get("overrides", {})
+            # group per (prompt, S1 megapixels): cross-resolution distance is a
+            # resolution artifact, not composition divergence - and per-MP
+            # grouping makes seed-variance-vs-resolution protocols readable.
+            u_groups.setdefault((str(_ov.get("prompt", "")),
+                                 str(_ov.get("s1_megapixels", ""))), []).append(j)
+        for grp in u_groups.values():
+            for j in grp:
+                others = [k for k in grp if k != j]
+                if not others:
+                    continue
+                d = float(np.mean([np.mean(np.abs(thumbs[j] - thumbs[k]))
+                                   for k in others]))
+                results[j].setdefault("metrics", {})["uniqueness"] = round(d * 100.0, 2)
+
     # order for the sheet
     sort_by = plan.get("sort_by", "plan_order")
     order = list(range(len(results)))
@@ -343,14 +434,24 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
         r = results[j]
         note = ""
         if "metrics" in r:
+            # Shorthand (Eric 2026-07-29): T time, S sharp_ten (the more
+            # trustworthy of the two sharpness numbers), C clip% with !/!!
+            # at his field-calibrated 4%/6% suspect/bad thresholds, N noise,
+            # U uniqueness (in a fixed-seed settings sweep LOW = consensus,
+            # HIGH = outlier/broken; high is only "better" in seed sweeps).
+            # splotch dropped from the sheet (no discrimination) - CSV keeps it.
             m = r["metrics"]
-            note = (f"{r.get('time_s', 0):.1f}s | sharp {m['sharpness_laplacian']:.0f}/"
-                    f"{m['sharpness_tenengrad']:.0f}  noise {m['noise_sigma']:.1f}  "
-                    f"splotch {m['flat_chroma_var']:.0f}")
+            clip_pct = 100.0 * m.get("clip_fraction", 0.0)
+            cflag = "!!" if clip_pct > 6.0 else ("!" if clip_pct > 4.0 else "")
+            note = (f"T{r.get('time_s', 0):.0f}s  "
+                    f"S{m['sharpness_tenengrad'] / 1000.0:.1f}k  "
+                    f"C{clip_pct:.1f}%{cflag}  N{m['noise_sigma']:.1f}")
+            if "uniqueness" in m:
+                note += f"  U{m['uniqueness']:.0f}"
         elif "time_s" in r:
             note = f"{r['time_s']:.1f}s"
         sheet_cells.append({"image": cells[j] if j < len(cells) else None,
-                            "caption": f"#{r['index']}  {r['label']}",
+                            "caption": f"#{r['index']}  " + short_label(r.get("overrides", {})),
                             "note": note or r.get("error", "")})
     header = (f"{sweep_id}   {len([r for r in results if 'file' in r])}/{n} cells   "
               f"sort: {sort_by}" + ("   QUICK-SCREEN" if quick else "")
@@ -377,7 +478,7 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
         w = csv.writer(f)
         w.writerow(["cell", "file", "gen_time_s"] + swept_cols
                    + ["sharp_lap", "sharp_ten", "noise", "splotch", "clip_pct",
-                      "s1_reused", "error"])
+                      "uniqueness", "s1_reused", "error"])
         for r in results:
             m = r.get("metrics") or {}
             w.writerow([r["index"], r.get("file", ""), r.get("time_s", "")]
@@ -387,6 +488,7 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
                           round(m.get("noise_sigma", 0), 1) if m else "",
                           round(m.get("flat_chroma_var", 0)) if m else "",
                           round(100 * m.get("clip_fraction", 0), 2) if m else "",
+                          m.get("uniqueness", ""),
                           r.get("s1_reused", ""), r.get("error", "")])
     log(f"[sweep] {sweep_dir}: {len([r for r in results if 'file' in r])}/{n} ok, "
         f"manifest + contact sheet written ({manifest['total_s']}s)")

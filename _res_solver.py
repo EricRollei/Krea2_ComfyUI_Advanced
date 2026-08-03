@@ -53,6 +53,10 @@ def _phi2(t: torch.Tensor) -> torch.Tensor:
     return (_phi1(t) - 1.0) / t
 
 
+def _phi3(t: torch.Tensor) -> torch.Tensor:
+    return (_phi2(t) - 0.5) / t
+
+
 # --------------------------------------------------------------------------------------
 # the sampler
 # --------------------------------------------------------------------------------------
@@ -317,6 +321,161 @@ def deis_sample(
 
 
 @torch.no_grad()
+def abnorsett_sample(denoise_fn, x, sigmas, order=4, eta=0.0, s_noise=1.0,
+                     noise_sampler=None, callback=None):
+    """Exponential Adams-Bashforth-Norsett multistep (abnorsett_3m / _4m).
+
+    Same kernel-exact machinery as deis_sample with ONE deliberate change:
+    the Lagrange abscissae are the UNIFORM points [0, -h, -2h, ...] of the
+    CURRENT step size, not the true history spacing. This is the classical
+    fixed-coefficient Norsett/ETD-AB form (and exactly what RES4LYF's
+    abnorsett_*m tables encode via phi-functions of h alone - verified
+    against rk_coefficients_beta.py 2026-07-27; order 4 reduces to the
+    textbook b1 = phi1 + 11/6 phi2 + 2 phi3 + phi4).
+
+    Consequence: the weights depend only on h, so they are BOUNDED on every
+    schedule - including the strongly non-uniform ladders (linear tail,
+    linear_quadratic, bong_tangent) where the exact variable-step weights of
+    deis order-4 blow up and amplify model-prediction noise into garbage
+    (measured 2026-07-27: worst sum|b| 269x on linear_quadratic). The price
+    is a mild formal-order reduction on non-uniform grids; on ladders that
+    are uniform in t = -log(sigma) (the exponential family) this coincides
+    with the exact method. This is why RES4LYF's abnorsett behaves and our
+    old order-4 alias didn't.
+
+    1 model eval/step; order ramps 1 -> `order` as history accrues; eta =
+    ancestral SDE churn as in the sibling samplers."""
+    if noise_sampler is None:
+        noise_sampler = lambda s, sn: torch.randn_like(x)
+    sigmas = sigmas.to(device=x.device, dtype=torch.float32)
+    n = sigmas.shape[0] - 1
+    order = max(1, int(order))
+    x0_hist = []
+    for i in range(n):
+        sigma = sigmas[i]
+        denoised = denoise_fn(x, sigma)
+        if callback is not None:
+            callback(i, sigma, denoised, x)
+        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        if float(sigma_down) <= 0.0:
+            x = denoised
+        else:
+            h = float(-math.log(float(sigma_down)) + math.log(float(sigma)))
+            o = min(order, len(x0_hist) + 1)
+            offsets = [-k * h for k in range(o)]          # uniform-spacing assumption
+            preds = [denoised] + x0_hist[:o - 1]
+            b = _exp_lagrange_coeffs(offsets, h)
+            x = math.exp(-h) * x + b[0] * preds[0]
+            for bc, pv in zip(b[1:], preds[1:]):
+                x = x + bc * pv
+            if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
+                x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        x0_hist.insert(0, denoised)
+        x0_hist = x0_hist[:order - 1]
+    return x
+
+
+@torch.no_grad()
+def lawson4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
+                   noise_sampler=None, callback=None):
+    """Lawson(4) exponential RK (lawson4_4s): classical RK4 through the
+    integrating factor e^t on the flow ODE dx/dt = x0(x,t) - x.
+
+    Single-step, 4 model evals/step, NO history -> the weights are pure
+    e^{-h} factors (all <= 1), unconditionally bounded on every schedule.
+    Matches RES4LYF's lawson4_4s tableau (b = [phi0/6, phi0(c2)/3,
+    phi0(c2)/3, 1/6] in their +h convention == our e^{-h} factors).
+
+    Update (h = t_down - t, all exponents negative):
+        N1 = N(x)
+        N2 = N( e^{-h/2} (x + h/2 N1) )
+        N3 = N( e^{-h/2} x + h/2 N2 )
+        N4 = N( e^{-h}   x + h e^{-h/2} N3 )
+        x' = e^{-h} x + h/6 ( e^{-h} N1 + 2 e^{-h/2} (N2 + N3) + N4 )
+
+    NOTE: not phi-exact for constant forcing (RK4 quadrature of the kernel,
+    O(h^5) residual) - a known Lawson-family property; the trade is maximum
+    simplicity and the strongest noise robustness in the package.
+    """
+    if noise_sampler is None:
+        noise_sampler = lambda s, sn: torch.randn_like(x)
+    sigmas = sigmas.to(device=x.device, dtype=torch.float32)
+    n = sigmas.shape[0] - 1
+    for i in range(n):
+        sigma = sigmas[i]
+        n1 = denoise_fn(x, sigma)
+        if callback is not None:
+            callback(i, sigma, n1, x)
+        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        if float(sigma_down) <= 0.0:
+            x = n1
+            continue
+        h = float(-math.log(float(sigma_down)) + math.log(float(sigma)))
+        eh, eh2 = math.exp(-h), math.exp(-h / 2.0)
+        s_mid = sigma * math.exp(-h / 2.0)                # sigma at the half node
+        n2 = denoise_fn(eh2 * (x + 0.5 * h * n1), s_mid)
+        n3 = denoise_fn(eh2 * x + 0.5 * h * n2, s_mid)
+        n4 = denoise_fn(eh * x + h * eh2 * n3, sigma_down)
+        x = eh * x + (h / 6.0) * (eh * n1 + 2.0 * eh2 * (n2 + n3) + n4)
+        if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
+            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+    return x
+
+
+@torch.no_grad()
+def etdrk4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
+                  noise_sampler=None, callback=None):
+    """ETDRK4 (Cox-Matthews) exponential RK (etdrk4_4s).
+
+    Single-step order 4, 4 model evals/step, no history -> stable on every
+    schedule. Coefficients are the classic Cox-Matthews phi-function set;
+    RES4LYF's etdrk4_4s tableau reduces to exactly these (their b2 = b3 =
+    2 phi2 - 4 phi3, b4 = -phi2 + 4 phi3, b1 filled to phi1 - sum).
+
+    Stages (h = t_down - t, phi_k evaluated at -h and -h/2):
+        N1 = N(x)
+        A  = e^{-h/2} x + (h/2) phi1(-h/2) N1            ; N2 = N(A)
+        B  = e^{-h/2} x + (h/2) phi1(-h/2) N2            ; N3 = N(B)
+        C  = e^{-h/2} A + (h/2) phi1(-h/2) (2 N3 - N1)   ; N4 = N(C)
+        x' = e^{-h} x + h [ b1 N1 + b2 (N2 + N3) + b4 N4 ]
+        b1 = phi1 - 3 phi2 + 4 phi3 ; b2 = 2 phi2 - 4 phi3 ; b4 = -phi2 + 4 phi3
+    """
+    if noise_sampler is None:
+        noise_sampler = lambda s, sn: torch.randn_like(x)
+    sigmas = sigmas.to(device=x.device, dtype=torch.float32)
+    n = sigmas.shape[0] - 1
+    for i in range(n):
+        sigma = sigmas[i]
+        n1 = denoise_fn(x, sigma)
+        if callback is not None:
+            callback(i, sigma, n1, x)
+        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        if float(sigma_down) <= 0.0:
+            x = n1
+            continue
+        h = float(-math.log(float(sigma_down)) + math.log(float(sigma)))
+        th = torch.tensor(-h, dtype=torch.float64)
+        th2 = torch.tensor(-h / 2.0, dtype=torch.float64)
+        p1h2 = float(_phi1(th2))
+        p1, p2, p3 = float(_phi1(th)), float(_phi2(th)), float(_phi3(th))
+        eh, eh2 = math.exp(-h), math.exp(-h / 2.0)
+        s_mid = sigma * math.exp(-h / 2.0)
+        A = eh2 * x + 0.5 * h * p1h2 * n1
+        n2 = denoise_fn(A, s_mid)
+        B = eh2 * x + 0.5 * h * p1h2 * n2
+        n3 = denoise_fn(B, s_mid)
+        C = eh2 * A + 0.5 * h * p1h2 * (2.0 * n3 - n1)
+        n4 = denoise_fn(C, sigma_down)
+        b1 = p1 - 3.0 * p2 + 4.0 * p3
+        b2 = 2.0 * p2 - 4.0 * p3
+        b4 = -p2 + 4.0 * p3
+        x = eh * x + h * (b1 * n1 + b2 * (n2 + n3) + b4 * n4)
+        if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
+            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+    return x
+
+
+@torch.no_grad()
 def lcm_sample(
     denoise_fn,
     x: torch.Tensor,
@@ -367,7 +526,7 @@ def lcm_sample(
 @torch.no_grad()
 def lcm_hybrid_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
                       noise_sampler=None, callback=None,
-                      second="deis_3m", split_frac=0.5):
+                      second="deis_3m", lcm_steps=0):
     """lcm churn for the FIRST part of the window, an ODE/SDE sampler after.
 
     Rationale (2026-07-23): with pure lcm the final detail is bounded by the x0
@@ -380,17 +539,21 @@ def lcm_hybrid_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
 
     2026-07-25: parameterized. `second` picks the tail sampler: "deis_3m"
     (default - the original hybrid) or "res_2m" (lcm_hybrid2 in the node GUI).
-    `split_frac` is the handoff point as a fraction of the window's steps
-    (0.5 default). ceil keeps the historical odd-count behavior: the churn
-    half gets the extra step, and split is clamped to [1, n-1] so both halves
-    always run at least one step."""
+    2026-07-26: `lcm_steps` is the ABSOLUTE number of lcm steps at the head of
+    the window (replaces the old fraction - at 12 steps a fraction only had 11
+    real values and small % changes were silent no-ops). 0 = auto: half the
+    window, ceil, so the churn half gets the odd extra step (the historical
+    behavior). Any value is clamped to [1, n-1] so both halves always run at
+    least one step."""
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = int(sigmas.shape[0]) - 1
     if n <= 1:
         return lcm_sample(denoise_fn, x, sigmas, s_noise=s_noise,
                           noise_sampler=noise_sampler, callback=callback)
-    sf = min(0.95, max(0.05, float(split_frac)))
-    split = max(1, min(n - 1, int(-(-n * sf // 1))))  # ceil, clamped
+    k = int(lcm_steps or 0)
+    if k <= 0:
+        k = -(-n // 2)  # auto: ceil(n/2), churn half gets the odd extra step
+    split = max(1, min(n - 1, k))
     x = lcm_sample(denoise_fn, x, sigmas[:split + 1], s_noise=s_noise,
                    noise_sampler=noise_sampler, callback=callback)
     _cb2 = (None if callback is None

@@ -33,6 +33,10 @@ const PRESET_NODES = {
         section: "sigmas", presetWidget: "sigmas_preset",
         skip: ["control_after_generate", "sigmas_preset"],
     },
+    EricKrea2SweepPlan: {
+        section: "sweep", presetWidget: "sweep_preset",
+        skip: ["control_after_generate", "sweep_preset", "enabled"],
+    },
     EricKrea2ApplyLoRA: {
         section: "apply_lora", presetWidget: "apply_lora_preset",
         skip: ["control_after_generate", "apply_lora_preset"],

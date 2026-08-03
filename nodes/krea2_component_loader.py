@@ -487,9 +487,14 @@ class EricKrea2ComponentLoader:
         return {
             "required": {
                 "base_pipeline_path": ("STRING", {
-                    "default": r"H:\Training\Krea-2-Raw",
+                    "default": r"H:\Training\Krea-2-Turbo",
                     "tooltip": "Full Krea 2 diffusers folder. Supplies model_index.json, scheduler, "
-                               "tokenizer, and any component you don't override below."}),
+                               "tokenizer, and any component you don't override below. NOTE: this "
+                               "folder's model_index.json is_distilled flag decides the whole "
+                               "sampling regime (Turbo: guidance forced 0, fixed distilled shift; "
+                               "Raw: real CFG + active negative prompt) - a Turbo checkpoint run "
+                               "against the Raw base renders blown/oversaturated. Default is Turbo "
+                               "as the common case (2026-07-28)."}),
             },
             "optional": {
                 "loader_preset": (_settings.list_preset_names("loader"), {"default": "custom",
@@ -778,13 +783,20 @@ class EricKrea2ComponentLoader:
             log("using cached component pipeline")
             apply_attention_backend(cache["pipeline"].transformer, attention_backend, log=log)
             _apply_vae_tiling_prefs(cache["pipeline"], vae_tiling, vae_tile_px)
-            return ({"pipeline": cache["pipeline"], "is_distilled": cache["is_distilled"],
-                     "model_path": base_pipeline_path,
-                     # Carried for downstream provenance (sweep naming + cell
-                     # metadata): the fine-tune identity and the full wrapped
-                     # loader recipe. Additive keys; all consumers use .get().
-                     "transformer_path": transformer_path,
-                     "loader_settings": loader_settings}, loader_settings)
+            # Return a weakref-able handle and (re)register it, so the copy
+            # ComfyUI caches for this node is ALWAYS the one the next model
+            # switch can neutralize in place. The old plain-dict return here
+            # was invisible to _free_current - after any cache-hit rerun, a
+            # model switch left the previous weights pinned by ComfyUI's
+            # output cache (Eric's multi-model queue VRAM stacking,
+            # 2026-07-29).
+            out = _Krea2PipelineHandle(pipeline=cache["pipeline"],
+                                       is_distilled=cache["is_distilled"],
+                                       model_path=base_pipeline_path,
+                                       transformer_path=transformer_path,
+                                       loader_settings=loader_settings)
+            builtins._ERIC_KREA2_LAST_HANDLE = weakref.ref(out)
+            return (out, loader_settings)
 
         # Building a new pipeline: free the previous one FIRST so we never hold two sets of
         # weights in VRAM at once (the transformer-swap OOM), and so keep_in_vram=False releases
@@ -845,6 +857,12 @@ class EricKrea2ComponentLoader:
             cache["pipeline"] = pipe
             cache["cache_key"] = cache_key
             cache["is_distilled"] = is_distilled
+            # Register the returned handle too (2026-07-29): keep_in_vram=True
+            # previously never registered it, so on a MODEL SWITCH the old
+            # weights stayed pinned by ComfyUI's node-output cache even though
+            # _free_current cleared the module cache - the auto-evict only
+            # worked for keep_in_vram=False. Now every return path registers.
+            builtins._ERIC_KREA2_LAST_HANDLE = weakref.ref(result)
         else:
             # Honor keep_in_vram=False literally: keep NO strong reference of our own.
             # After this run ComfyUI's node-output cache is the SOLE owner, so the

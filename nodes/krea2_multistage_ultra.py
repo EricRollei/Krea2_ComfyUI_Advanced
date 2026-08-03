@@ -39,14 +39,16 @@ from .._latent_utils import (
 )
 from .._upscale_vae import upscale_between_stages, decode_latents_with_upscale_vae
 from .._res_solver import (res_multistep_sample, res_2s_sample, deis_sample,
-                           rk_explicit_sample, lcm_sample, lcm_hybrid_sample)
+                           rk_explicit_sample, lcm_sample, lcm_hybrid_sample,
+                           abnorsett_sample, lawson4_sample, etdrk4_sample)
 from .. import _sigmas
 from .. import _telemetry
 
 _VAE_SCALE_FACTOR = 8  # AutoencoderKLQwenImage is f8
-_SCHEDULES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent", "exponential"]
-_SAMPLERS = ["euler", "res_2m", "res_2s", "deis_3m", "deis_4m", "rk6_7s", "abnorsett_4m", "lcm",
-             "lcm_hybrid", "lcm_hybrid2"]
+_SCHEDULES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent",
+              "exponential", "linear_quadratic"]
+_SAMPLERS = ["euler", "res_2m", "res_2s", "deis_3m", "abnorsett_3m", "abnorsett_4m",
+             "lawson4_4s", "etdrk4_4s", "rk6_7s", "lcm", "lcm_hybrid", "lcm_hybrid2"]
 _NOISE_TYPES = ["white", "low_freq", "high_freq", "pink"]
 _NOISE_STRENGTH = 0.30  # how far non-white noise leans from white (kept low so the
                         # flow-match denoiser, trained on white noise, can still clean it)
@@ -371,7 +373,7 @@ def _jitter_embeds(embeds, strength, generator):
 def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
                         is_distilled, guidance_scale, eta, generator, progress_cb=None,
                         sigma_window=None, method="res_2m", cond_override=None, noise_type="white",
-                        shift_policy=None, shift_stage=None, hybrid_split=0.5):
+                        shift_policy=None, shift_stage=None, hybrid_lcm_steps=0):
     """Run the RES multistep (res_2m) sampler over the Krea2 transformer directly,
     bypassing pipe.__call__. Returns the packed latent (same format as pipe(...).images).
 
@@ -466,14 +468,22 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
     elif method == "deis_3m":
         out = deis_sample(denoise_fn, x, sigmas, max_order=3, eta=float(eta or 0.0),
                           noise_sampler=noise_sampler, callback=_cb)
-    elif method == "deis_4m":
-        out = deis_sample(denoise_fn, x, sigmas, max_order=4, eta=float(eta or 0.0),
-                          noise_sampler=noise_sampler, callback=_cb)
-    elif method == "abnorsett_4m":
-        # exponential Adams-Bashforth-Norsett order 4: in our kernel-exact solver
-        # formulation this IS deis order-4 (see _res_solver.py) - recipe-name alias.
-        out = deis_sample(denoise_fn, x, sigmas, max_order=4, eta=float(eta or 0.0),
-                          noise_sampler=noise_sampler, callback=_cb)
+    elif method in ("abnorsett_3m", "abnorsett_4m"):
+        # Fixed-coefficient Norsett exponential AB (2026-07-27): uniform-step
+        # phi weights (RES4LYF-faithful), bounded on EVERY schedule - unlike
+        # the exact variable-step order-4 (former deis_4m alias) whose weights
+        # blew up ~269x on linear_quadratic and amplified prediction noise
+        # into garbage. deis_4m was dropped for that reason (Eric's call).
+        out = abnorsett_sample(denoise_fn, x, sigmas,
+                               order=(3 if method == "abnorsett_3m" else 4),
+                               eta=float(eta or 0.0),
+                               noise_sampler=noise_sampler, callback=_cb)
+    elif method == "lawson4_4s":
+        out = lawson4_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+                             noise_sampler=noise_sampler, callback=_cb)
+    elif method == "etdrk4_4s":
+        out = etdrk4_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+                            noise_sampler=noise_sampler, callback=_cb)
     elif method == "rk6_7s":
         out = rk_explicit_sample(denoise_fn, x, sigmas, tableau="rk6_7s",
                                  eta=float(eta or 0.0), noise_sampler=noise_sampler,
@@ -503,12 +513,14 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
         else:
             # lcm_hybrid: lcm churn -> deis_3m tail; lcm_hybrid2: lcm -> res_2m
             # tail (2026-07-25 - res_2m was testing better than deis_3m as the
-            # detail-development half). hybrid_split sets the handoff fraction.
+            # detail-development half). hybrid_lcm_steps = exact churn steps
+            # (0 = auto half); replaced the old fraction 2026-07-26 because at
+            # low step counts small % changes were silent no-ops.
             out = lcm_hybrid_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
                                     noise_sampler=_ns, callback=_cb,
                                     second=("res_2m" if method == "lcm_hybrid2"
                                             else "deis_3m"),
-                                    split_frac=float(hybrid_split))
+                                    lcm_steps=int(hybrid_lcm_steps or 0))
     else:
         out = res_multistep_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
                                    noise_sampler=noise_sampler, callback=_cb)
@@ -633,14 +645,18 @@ class EricKrea2MultistageUltra:
                     "tooltip": "Denoise solver. euler: 1st-order (fastest, A/B baseline). "
                                "res_2m: RES 2nd-order exponential MULTIstep (sharper, same model-call "
                                "cost as euler). res_2s: RES 2nd-order SINGLE-step predictor/corrector "
-                               "(strongest at low steps, ~2x slower). deis_3m / deis_4m: DEIS 3rd/4th "
-                               "-order multistep (very smooth, same cost as euler). All but euler honour "
-                               "a noisy early end_step. rk6_7s: 6th-order 7-stage explicit Runge-Kutta " 
-                               "- highest solver accuracy, ~7x model calls per step (the kreamania " 
-                               "finetuner pass-1 recipe with linear_quadratic sigmas). abnorsett_4m: " 
-                               "exponential Adams-Bashforth-Norsett 4th-order multistep, 1 call/step " 
-                               "(identical to deis_4m in this solver - recipe-name alias; the " 
-                               "kreamania pass-2 pick with bong_tangent). Recommended: res_2s + " 
+                               "(strongest at low steps, ~2x slower). deis_3m: DEIS 3rd-order "
+                               "multistep, exact variable-step weights (very smooth, euler cost). "
+                               "abnorsett_3m / abnorsett_4m: Norsett exponential Adams-Bashforth "
+                               "3rd/4th order, 1 call/step, FIXED uniform-step weights - bounded "
+                               "and stable on every schedule incl. linear_quadratic (the kreamania "
+                               "pass-2 style pick). lawson4_4s / etdrk4_4s: single-step exponential "
+                               "RK order 4, 4 calls/step, no history - the most noise-robust "
+                               "solvers here, stable everywhere; strong on refine windows. All but "
+                               "euler honour a noisy early end_step. rk6_7s: 6th-order 7-stage "
+                               "explicit Runge-Kutta - highest solver accuracy, ~7x model calls "
+                               "per step (the kreamania finetuner pass-1 recipe with "
+                               "linear_quadratic sigmas). Recommended: res_2s + "
                                "beta57 for Stage 1. lcm: full ancestral - every step jumps to "
                                "x0 and fully re-noises to the next sigma (ignores eta, always "
                                "seeded). The artifact-launderer: strongest choice for "
@@ -707,7 +723,7 @@ class EricKrea2MultistageUltra:
                 "s2_schedule": (_SCHEDULES, {"default": "linear"}),
                 "s2_sampler": (_SAMPLERS, {"default": "euler",
                     "tooltip": "Denoise solver for Stage 2 (see s1_sampler). Recommended for the "
-                               "refine pass: deis_3m or deis_4m + bong_tangent schedule."}),
+                               "refine pass: deis_3m or abnorsett_4m + bong_tangent schedule."}),
                 "s2_noise": (_NOISE_TYPES, {"default": "white",
                     "tooltip": "Shapes the SDE ancestral-churn noise only (eta>0, non-euler samplers) - "
                                "NOT the primary re-noise. See s1_noise."}),
@@ -737,7 +753,7 @@ class EricKrea2MultistageUltra:
                                "image fully denoises to sigma 0; ending early leaves visible noise."}),
                 "s3_schedule": (_SCHEDULES, {"default": "linear"}),
                 "s3_sampler": (_SAMPLERS, {"default": "euler",
-                    "tooltip": "Denoise solver for Stage 3 (see s1_sampler). deis_3m / deis_4m + "
+                    "tooltip": "Denoise solver for Stage 3 (see s1_sampler). deis_3m / abnorsett_4m + "
                                "bong_tangent works well for the final refine."}),
                 "s3_noise": (_NOISE_TYPES, {"default": "white",
                     "tooltip": "Shapes the SDE ancestral-churn noise only (eta>0, non-euler samplers) - "
@@ -836,15 +852,20 @@ class EricKrea2MultistageUltra:
                                "global: overall mean/std only. off: previous behavior. A "
                                "telemetry line prints latent std pre-hop / post-hop / "
                                "post-renorm in every mode, so the drain is measurable."}),
-                "hybrid_split": ("FLOAT", {"default": 0.5, "min": 0.05, "max": 0.95, "step": 0.05,
-                    "tooltip": "Handoff point for the lcm_hybrid / lcm_hybrid2 samplers, as a "
-                               "fraction of the stage's denoise window: lcm full-churn runs the "
-                               "first part (launders upscale damage at high sigma), then the "
-                               "tail sampler develops detail (lcm_hybrid: deis_3m; lcm_hybrid2: "
-                               "res_2m). 0.5 = historical behavior (odd counts give the churn "
-                               "half the extra step). Lower = more trajectory-faithful detail, "
-                               "higher = more laundering. Ignored by every other sampler. "
-                               "Sweepable via combos JSON: {\"hybrid_split\": 0.33}."}),
+                "s1_hybrid_steps": ("INT", {"default": 0, "min": 0, "max": 98,
+                    "tooltip": "lcm_hybrid / lcm_hybrid2 on Stage 1: EXACT number of lcm "
+                               "full-churn steps at the head of the stage's window before the "
+                               "tail sampler takes over (lcm_hybrid: deis_3m; lcm_hybrid2: "
+                               "res_2m). 0 = auto (half the window, ceil - the historical "
+                               "behavior). Clamped so both halves always run at least one "
+                               "step. Fewer lcm steps = more trajectory-faithful detail; more "
+                               "= more laundering. Ignored by every other sampler."}),
+                "s2_hybrid_steps": ("INT", {"default": 0, "min": 0, "max": 98,
+                    "tooltip": "Stage 2 hybrid handoff in exact lcm steps (0 = auto half). "
+                               "See s1_hybrid_steps."}),
+                "s3_hybrid_steps": ("INT", {"default": 0, "min": 0, "max": 98,
+                    "tooltip": "Stage 3 hybrid handoff in exact lcm steps (0 = auto half). "
+                               "See s1_hybrid_steps."}),
             },
         }
 
@@ -1050,7 +1071,8 @@ class EricKrea2MultistageUltra:
                  upscale_vae=None, upscale_vae_mode="disabled", s1_s2_upscale_vae=False,
                  decode_vae=None, preview_stages=False, sigmas=None,
                  distilled_shift="fixed", shift_mu_s1=1.15, shift_mu_s2=1.15, shift_mu_s3=1.15,
-                 upscale_renorm="off", hybrid_split=0.5, _s1_reuse=None):
+                 upscale_renorm="off", s1_hybrid_steps=0, s2_hybrid_steps=0,
+                 s3_hybrid_steps=0, _s1_reuse=None):
         pipe = krea2_pipeline["pipeline"]
         is_distilled = krea2_pipeline.get("is_distilled", False)
         # Distilled shift policy (2026-07-21): per-stage mu for Turbo models - see
@@ -1326,7 +1348,10 @@ class EricKrea2MultistageUltra:
                                        is_distilled, float(cfg), float(stage_eta), gen,
                                        progress_cb=_res_progress, sigma_window=window,
                                        method=sampler, cond_override=_cond_override,
-                                       noise_type=noise_type, hybrid_split=hybrid_split,
+                                       noise_type=noise_type,
+                                       hybrid_lcm_steps={"s1": s1_hybrid_steps,
+                                                         "s2": s2_hybrid_steps,
+                                                         "s3": s3_hybrid_steps}[stage_key],
                                        shift_policy=shift_policy, shift_stage=stage_key)
 
         def _latent_dict(lat, h, w):
@@ -1403,7 +1428,7 @@ class EricKrea2MultistageUltra:
                                               is_distilled, float(s1_cfg), float(s1_eta), gen_s1,
                                               progress_cb=_res_progress, method=s1_sampler,
                                               cond_override=_cond_override, noise_type=s1_noise,
-                                              hybrid_split=hybrid_split,
+                                              hybrid_lcm_steps=s1_hybrid_steps,
                                               shift_policy=shift_policy, shift_stage="s1")
             else:
                 if s1_noise != "white" and s1_eta and s1_eta > 0:

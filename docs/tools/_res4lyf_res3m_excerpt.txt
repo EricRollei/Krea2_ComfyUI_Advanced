@@ -1,0 +1,70 @@
+
+        case "lawson4_4s": 
+            c1,c2,c3,c4 = 0, 1/2, 1/2, 1
+            ci = [c1,c2,c3,c4]
+            φ = Phi(h, ci, use_analytic_solution)
+            
+            a2_1 = c2 * φ(0,2)
+            a3_2 = 1/2
+            a4_3 = φ(0,2)
+            
+            b1 = (1/6) * φ(0)
+            b2 = (1/3) * φ(0,2)
+            b3 = (1/3) * φ(0,2)
+            b4 = 1/6
+
+            a = [
+                    [0,    0,    0,    0],
+                    [a2_1, 0,    0,    0],
+                    [0,    a3_2, 0,    0],
+                    [0,    0,    a4_3, 0],
+            ]
+            b = [
+                    [b1,b2,b3,b4],
+            ]
+
+        case "lawson41-gen_4s": # GenLawson4 https://ora.ox.ac.uk/objects/uuid:cc001282-4285-4ca2-ad06-31787b540c61/files/m611df1a355ca243beb09824b70e5e774
+            c1,c2,c3,c4 = 0, 1/2, 1/2, 1
+            ci = [c1,c2,c3,c4]
+            φ = Phi(h, ci, use_analytic_solution)
+
+
+        case "etdrk4_4s": # https://ora.ox.ac.uk/objects/uuid:cc001282-4285-4ca2-ad06-31787b540c61/files/m611df1a355ca243beb09824b70e5e774
+            c1,c2,c3,c4 = 0, 1/2, 1/2, 1
+            ci = [c1,c2,c3,c4]
+            φ = Phi(h, ci, use_analytic_solution)
+            
+            a3_2 =   φ(1,2)
+            a4_3 = 2*φ(1,2)
+
+            b2 = 2*φ(2) - 4*φ(3)
+            b3 = 2*φ(2) - 4*φ(3)
+            b4 =  -φ(2) + 4*φ(3)
+
+            a = [
+                    [0, 0,0,0],
+                    [0, 0,0,0],
+                    [0, a3_2,0,0],
+                    [0, 0, a4_3,0],
+            ]
+            b = [
+                    [0, b2, b3, b4],
+            ]
+
+            a, b = gen_first_col_exp(a,b,ci,φ)
+
+
+        case "etdrk4_4s_alt": # pg 70 col 1 computed with (4.9) https://ora.ox.ac.uk/objects/uuid:cc001282-4285-4ca2-ad06-31787b540c61/files/m611df1a355ca243beb09824b70e5e774
+            c1,c2,c3,c4 = 0, 1/2, 1/2, 1
+            ci = [c1,c2,c3,c4]
+            φ = Phi(h, ci, use_analytic_solution)
+            
+            a2_1 = φ(1,2)  #unsure about this, looks bad and is pretty different from col #1 implementations for everything else except the other 4s alt and 5s ostermann??? from the link
+            a3_1 = 0
+            a4_1 = φ(1) - 2*φ(1,2)
+            
+            a3_2 =   φ(1,2)
+            a4_3 = 2*φ(1,2)
+
+            b1 = φ(1) - 3*φ(2) + 4*φ(3)
+            b2 = 2*φ(2) - 4*φ(3)

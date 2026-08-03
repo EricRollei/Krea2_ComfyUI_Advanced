@@ -167,9 +167,11 @@ with group **bypass** (Ctrl+B) instead of juggling separate workflows. See
 *The Sigmas node: per-stage curve / `detail_bias` / Beta α-β overrides with a live sigma preview per stage (solid = steps that run, ring = re-noise level, ghost = full schedule).*
 
 Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
-`deis_4m`, `rk6_7s`, `abnorsett_4m`, `lcm`, `lcm_hybrid`, `lcm_hybrid2`.
+`abnorsett_3m`, `abnorsett_4m`, `lawson4_4s`, `etdrk4_4s`, `rk6_7s`,
+`lcm`, `lcm_hybrid`, `lcm_hybrid2`.
 Schedules: `linear`, `balanced`, `karras`, `beta57`, `beta`,
-`bong_tangent`, `exponential`. See [Samplers & schedules](#samplers--schedules).
+`bong_tangent`, `exponential`, `linear_quadratic`.
+See [Samplers & schedules](#samplers--schedules).
 
 ### Sweeping & characterization
 
@@ -409,19 +411,77 @@ actually made:
 - **`lcm_hybrid2`** - lcm churn, then a `res_2m` tail (added 2026-07-25;
   res_2m has been testing better than deis_3m as the detail-development half
   on several fine tunes - both tails cost the same per step).
-- **`hybrid_split`** (Ultra widget, 0.05-0.95, default 0.5) - the handoff
-  point as a fraction of the stage's window. Lower = more trajectory-faithful
-  detail; higher = more laundering. 0.5 reproduces the original behavior
-  (odd counts give the churn half the extra step). Ignored by every other
-  sampler; sweepable via combos JSON (`{"hybrid_split": 0.33}`).
+- **`s1/s2/s3_hybrid_steps`** (Ultra widgets, default 0) - the handoff in
+  EXACT lcm steps at the head of that stage's window. 0 = auto (half the
+  window, ceil - the original behavior). At low step counts this is the
+  honest control: a fraction only has window-1 real values, so small %
+  changes were silent no-ops. Fewer lcm steps = more trajectory-faithful
+  detail; more = more laundering. Clamped so both halves always run; ignored
+  by every other sampler. Sweepable via the `hybrid_steps` axis or combos
+  JSON (`{"s2_hybrid_steps": 4}`).
 - `eta`/`noise_type` apply to the tail half only; the lcm half is inherently
   fully ancestral and always re-noises with plain seeded white (colored
   noise as a full replacement is out-of-distribution -> rainbow blotches).
-- `eta` contract: honoured by `res_2m`/`res_2s`/`deis_3m`/`deis_4m`/
-  `abnorsett_4m`/`rk6_7s` and the hybrid tails; **ignored by `euler` and
-  `lcm`** (euler is the deterministic baseline - enforced in the dispatch,
-  and the Sweep Plan automatically drops cells that differ only by inert
-  eta/noise on those samplers).
+- `eta` contract: honoured by `res_2m`/`res_2s`/`deis_3m`/`abnorsett_3m`/
+  `abnorsett_4m`/`lawson4_4s`/`etdrk4_4s`/`rk6_7s` and the hybrid tails;
+  **ignored by `euler` and `lcm`** (euler is the deterministic baseline -
+  enforced in the dispatch, and the Sweep Plan automatically drops cells
+  that differ only by inert eta/noise on those samplers).
+
+**The Norsett & exponential-RK additions (2026-07-27):** `abnorsett_4m` is
+no longer a deis alias - it is the genuine fixed-coefficient Norsett
+exponential Adams-Bashforth method (RES4LYF-faithful, verified against its
+phi tables), with `abnorsett_3m` as its 3rd-order sibling; the weights
+depend only on the current step size, so they stay BOUNDED on every
+schedule. `deis_4m` was removed: its exact variable-step weights blow up on
+strongly non-uniform ladders (measured 269x on `linear_quadratic`) and
+amplify model-prediction noise into garbage - if a saved workflow used it,
+pick `abnorsett_4m` (stable order 4, same 1 call/step) or `deis_3m`.
+`lawson4_4s` and `etdrk4_4s` are single-step exponential RK order 4
+(4 model calls/step, no history): the most noise-robust solvers in the
+package, stable everywhere, strong candidates for refine windows. Note
+lawson is deliberately not phi-exact for constant forcing (classical
+Lawson quadrature) - a texture character difference from etdrk4, not a bug.
+
+### Sampler x schedule pairing guide (12 steps, measured 2026-07-28)
+
+Numbers = median deviation of the final state when the model's per-step
+predictions disagree by 2% (the solver's amplification of prediction noise;
+lower = more stable). Stability is necessary, not sufficient - which stable
+pair looks BEST for a given fine tune is what the sweep decides.
+
+| sampler | best schedules | fine | avoid |
+|---|---|---|---|
+| `euler`, `res_2s` | any (0.017-0.029) | - | - |
+| `lawson4_4s`, `etdrk4_4s` | any (0.009-0.022, noise-suppressing) | - | - |
+| `res_2m` | exponential/beta/beta57/karras (0.020-0.022) | linear (0.053) | linear_quadratic (0.152) |
+| `deis_3m` | exponential/beta57/beta/karras (0.022-0.025), `OPT-DEIS12` ★ (karras +0.75 bias, 0.023) | bong_tangent/balanced (~0.03), linear (0.118) | linear_quadratic (0.834) |
+| `abnorsett_3m` | beta57/beta (0.021), exponential/karras (0.022-0.025) | linear (0.060), linear_quadratic (0.115) | - |
+| `abnorsett_4m` | beta57/beta (0.022), `OPT-AB412` ★ (beta57 +0.5 bias) | exponential/karras (~0.03), linear_quadratic (0.178) | - |
+| `lcm_hybrid`/`2` | beta57/beta/karras/exponential (0.023-0.028) + the EXP ★ family | bong_tangent (~0.026) | linear (0.055-0.116), linear_quadratic (~0.15) |
+
+Detail-bias windows (how far you can push `detail_bias` before conditioning
+degrades, per curve): deis_3m stays clean on exponential to +0.25, on
+beta57/beta from -0.75 to +0.5, and on karras it IMPROVES with positive bias
+(clean -0.25 to +0.75 - positive bias straightens the karras tail in
+t = -log sigma, which is why `OPT-DEIS12` = karras +0.75 is both the most
+detail-holding and among the most stable deis_3m curves). abnorsett_4m:
+beta57/beta clean -0.75..+0.5; exponential to 0; karras never fully clean.
+Single-step order-4 samplers ignore conditioning entirely - schedule choice
+is pure aesthetics there. `OPT-DEIS12` and `OPT-AB412` ship as ★ sigma
+presets (S1-only, 12-step recipes).
+
+**Field-tested Stage-1 recipe (2026-07-26, found with the sweep system):**
+12 total S1 steps with either hybrid (`lcm_hybrid` / `lcm_hybrid2`) over an
+exponential-family custom sigma curve (authored in the Eric Krea2 Sigmas
+node and saved as ★ presets - e.g. the EXP1-EXP4 set) lands among the
+fastest runs while holding up across most fine tunes and curves. The
+handoff sweet spot is **`s1_hybrid_steps = 7` of 12** for most model/curve
+combinations. Treat it as a development control: **5-6** lcm steps hands
+off earlier and develops more fine detail; **8** (sometimes 9) launders
+longer for a cleaner, less-detailed look. The recipe re-derives itself per
+fine tune in one sweep: samplers `lcm_hybrid, lcm_hybrid2` x
+`hybrid_steps` `5, 6, 7, 8` x your saved curves in `sigma_profiles`.
 
 
 ## img2img
@@ -655,7 +715,12 @@ renorm) runs untouched per cell.
 **Grid mode:** fill any of the axis fields - `samplers`, `schedulers`
 (`pair_lock` zips them into fixed pairs), `steps`, `windows` (`5-12` →
 start/end step), `etas`, `noise_types`, `cfgs`, `shift_modes`/`mus`,
-`megapixels` - blank = not swept (panel value used). Full cross product,
+`hybrid_steps`, `megapixels` - blank = not swept (panel value used). The
+`schedulers` field takes built-in schedules AND saved sigma-shape ★ preset
+names mixed freely (each entry resolves as a schedule first, then as a
+sigmas preset applied as that cell's full profile; unknown names are
+skipped with a console warning, never an abort), and comes pre-populated
+with everything available - delete what you don't want. Full cross product,
 hard-refused over `max_combos` with an axis-size breakdown. Cells that differ
 only by inert knobs (eta/noise on `euler`/`lcm`) are deduped automatically.
 
@@ -687,6 +752,12 @@ wavelet noise sigma, flat-region chroma variance (splotch/turbo-residue
 detector), clip fraction. `sort_by` pre-sorts the sheet; scores never hide a
 cell - the eye stays the judge.
 
+**Uniqueness** (model-free, automatic): every cell also gets a
+composition-uniqueness score - its mean distance from the other cells'
+64x64 luma thumbnails, grouped per prompt block. At the sweep's fixed seed
+this distance IS composition divergence, so "which settings actually change
+the picture" becomes a sortable column (sheet, CSV, manifest, `sort_by`).
+
 **Promotion:** `Eric Krea2 Sweep → Preset` reads a manifest cell into
 `ultra_presets.json` (swept keys only, or the full recipe), auto-tagged with
 the checkpoint name and an `objective` note - per-fine-tune preset libraries
@@ -714,6 +785,12 @@ by construction.
   the Eric Krea2 Sigmas node (validated at plan time); each cell rebuilds
   the full bundle from that preset, overriding any wired sigmas node for
   that cell.
+- **Trigger words** (`lora_triggers`, default `append`) - each bake-off
+  cell merges its swept LoRA''s trigger words (from the stack node''s cached
+  trigger database) into that cell''s prompt, so trigger-dependent styles are
+  measured fully activated. Only sweep-injected entries contribute; baseline
+  and ladder cells are untouched; a changed prompt re-encodes automatically;
+  the effective prompt + triggers land in the cell''s metadata.
 
 All v2 axes cross with every classic axis, in grid mode AND on top of
 explicit combos, under the same cap and dedupe rules. LoRA/prompt/profile
@@ -723,6 +800,20 @@ the panel's - so every file stays a complete standalone recipe.
 
 Failed cells never kill a sweep (red tile + manifest error), and interrupts
 finalize the files on disk before stopping the queue item.
+
+**Auto Pick:** `Eric Krea2 Sweep Auto Pick` closes the loop from sweep to
+preset: manifest in, `cell_index` + a human-readable report out. Objectives:
+`fastest_acceptable` (fastest cell passing quality gates - gates
+self-calibrate against the sweep median, or against an eye-picked
+`reference_cell`, with a `tolerance` slack), `most_unique` (highest
+composition-uniqueness; recomputed from the cell PNGs for older sweeps),
+`best_metric` (any built-in column), and `best_external` (any column of a
+`scores.csv` you drop into the sweep folder from external scoring tools -
+UniPercept, subject-sharpness, grain-aware analysis - joined by filename).
+Wire `cell_index` into Sweep -> Preset (convert its widget to an input) and
+one queue runs sweep -> pick -> promote. The picker proposes and explains
+its choice with runners-up; promotion only happens because you queued the
+preset node - metrics never silently write your preset library.
 
 ## Notes
 

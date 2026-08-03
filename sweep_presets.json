@@ -1,0 +1,92 @@
+{
+  "VarSeed-1mp": {
+    "sweep": {
+      "mode": "grid",
+      "stage_scope": "s1",
+      "samplers": "lcm_hybrid2",
+      "schedulers": "EXP3",
+      "hybrid_steps": "7",
+      "seed_policy": "seeds_axis",
+      "seeds": "101,102,103,104,105,106,107,108",
+      "sort_by": "uniqueness",
+      "score_metrics": true,
+      "max_combos": 16,
+      "lora_mode": "none",
+      "megapixels": "1",
+      "preset_notes": "Seed-to-seed variance protocol at 1MP: anchor recipe (lcm_hybrid2 x EXP6 x hybrid 7), 8 seeds as the only axis. Read MEAN UNIQUENESS on the sheet as compositional variance; compare across the 1/2/3MP presets to test larger-S1-more-variance."
+    }
+  },
+  "VarSeed-2mp": {
+    "sweep": {
+      "mode": "grid",
+      "stage_scope": "s1",
+      "samplers": "lcm_hybrid2",
+      "schedulers": "EXP3",
+      "hybrid_steps": "7",
+      "seed_policy": "seeds_axis",
+      "seeds": "101,102,103,104,105,106,107,108",
+      "sort_by": "uniqueness",
+      "score_metrics": true,
+      "max_combos": 16,
+      "lora_mode": "none",
+      "megapixels": "2",
+      "preset_notes": "Seed-to-seed variance protocol at 2MP: anchor recipe (lcm_hybrid2 x EXP6 x hybrid 7), 8 seeds as the only axis. Read MEAN UNIQUENESS on the sheet as compositional variance; compare across the 1/2/3MP presets to test larger-S1-more-variance."
+    }
+  },
+  "VarSeed-3mp": {
+    "sweep": {
+      "mode": "grid",
+      "stage_scope": "s1",
+      "samplers": "lcm_hybrid2",
+      "schedulers": "EXP3",
+      "hybrid_steps": "7",
+      "seed_policy": "seeds_axis",
+      "seeds": "101,102,103,104,105,106,107,108",
+      "sort_by": "uniqueness",
+      "score_metrics": true,
+      "max_combos": 16,
+      "lora_mode": "none",
+      "megapixels": "3",
+      "preset_notes": "Seed-to-seed variance protocol at 3MP: anchor recipe (lcm_hybrid2 x EXP6 x hybrid 7), 8 seeds as the only axis. Read MEAN UNIQUENESS on the sheet as compositional variance; compare across the 1/2/3MP presets to test larger-S1-more-variance."
+    }
+  },
+  "full sweep all samplers schedulers": {
+    "sweep": {
+      "mode": "grid",
+      "stage_scope": "s1",
+      "samplers": "euler, res_2m, res_2s, deis_3m, abnorsett_3m, abnorsett_4m, lawson4_4s, etdrk4_4s, rk6_7s, lcm, lcm_hybrid, lcm_hybrid2",
+      "schedulers": "linear, balanced, karras, beta57, beta, bong_tangent, exponential, linear_quadratic, EXP1, EXP2, EXP3, EXP4, EXP5, EXP6,  OPT-AB412, OPT-DEIS12, ",
+      "pair_lock": false,
+      "steps": "",
+      "windows": "",
+      "etas": "",
+      "noise_types": "",
+      "cfgs": "",
+      "shift_modes": "",
+      "mus": "",
+      "combos_file": "",
+      "combos_json": "",
+      "seed_policy": "fixed",
+      "seeds": "",
+      "quick_screen": false,
+      "screen_megapixels": 1,
+      "score_metrics": true,
+      "sort_by": "plan_order",
+      "tile_px": 448,
+      "max_combos": 160,
+      "output_folder": "",
+      "hybrid_steps": "",
+      "megapixels": "2.5",
+      "lora_mode": "none",
+      "lora_files": "",
+      "lora_strengths": "",
+      "lora_target": "1",
+      "include_baseline": true,
+      "keep_panel_stack": false,
+      "prompts": "",
+      "sigma_profiles": "",
+      "lora_triggers": "append",
+      "preset_notes": "Full Test of all sampler/scheduler combinations"
+    }
+  }
+}

@@ -8,6 +8,10 @@
 # Local pre-change source snapshots (redundant with git history)
 docs/backup/
 
+# Timestamped local backups (e.g. sigmas_presets.json.backup_2026-07-28)
+*.backup_*
+*.bak
+
 # Python bytecode / caches
 __pycache__/
 *.py[cod]

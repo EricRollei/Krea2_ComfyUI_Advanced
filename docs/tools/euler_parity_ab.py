@@ -127,6 +127,11 @@ def main():
     noise = torch.randn(clean.shape, device=dev, dtype=torch.float32, generator=gn)
     noised = (1.0 - s0) * clean + s0 * noise
 
+    # Chaos-control arm: the SAME pipe-style loop as A, but with one tiny
+    # bf16-ulp-scale perturbation at entry. After 13 steps through a 12B
+    # transformer, its distance from A is the pure chaos-amplification floor:
+    # if it lands at the same distance as the solver arms, precision-seeded
+    # divergence explains everything and the formulation is exonerated.
     results = {}
     with torch.no_grad():
         # A: old pipe-style loop - bf16 latents, scheduler.step each step
@@ -142,6 +147,22 @@ def main():
                                  attention_kwargs=None, return_dict=False)[0]
             latA = pipe.scheduler.step(v, t, latA, return_dict=False)[0]
         results["A_pipe_bf16"] = latA.to(torch.float32)
+
+        # A_perturbed: chaos control - identical loop, one-shot 1e-3 nudge
+        pipe.scheduler.set_timesteps(sigmas=rawN, device=dev, mu=1.15)
+        pipe.scheduler.set_begin_index(args.start)
+        gp = torch.Generator(device=dev).manual_seed(args.seed + 99)
+        latP = (noised + 1e-3 * torch.randn(noised.shape, device=dev,
+                                            dtype=torch.float32, generator=gp)
+                ).to(torch.bfloat16)
+        for t in tsteps:
+            v = pipe.transformer(hidden_states=latP, encoder_hidden_states=emb,
+                                 timestep=(t / pipe.scheduler.config.num_train_timesteps)
+                                 .expand(latP.shape[0]).to(latP.dtype),
+                                 position_ids=pos, encoder_attention_mask=mask,
+                                 attention_kwargs=None, return_dict=False)[0]
+            latP = pipe.scheduler.step(v, t, latP, return_dict=False)[0]
+        results["A2_chaos_control"] = latP.to(torch.float32)
 
         # B: current solver path - fp32 accumulator, x0-form euler
         def denoise_fn(xx, sigma):
@@ -160,27 +181,39 @@ def main():
             latB2 = latB2.to(torch.bfloat16).to(torch.float32)  # per-step quantization
         results["B2_solver_bf16steps"] = latB2
 
-    ref = results["A_pipe_bf16"]
-    print("\n[parity] latent deltas vs A (old pipe path):")
-    for k, v in results.items():
-        d = (v - ref).abs()
-        print(f"  {k:22s} max {d.max().item():.6f}  mean {d.mean().item():.6f}  "
-              f"rel {(d.mean() / ref.abs().mean()).item():.6f}")
+    print("\n[parity] pairwise latent deltas (mean-relative):")
+    keys = list(results.keys())
+    denom = results["A_pipe_bf16"].abs().mean()
+    for i, ka in enumerate(keys):
+        for kb in keys[i + 1:]:
+            d = (results[ka] - results[kb]).abs()
+            print(f"  {ka:20s} vs {kb:20s} max {d.max().item():.6f}  "
+                  f"rel {(d.mean() / denom).item():.6f}")
+    print("\n[parity] verdict guide: if A2_chaos_control sits at the SAME rel "
+          "distance from A as the solver arms (~all pairs similar), the gap is "
+          "pure chaos amplification of rounding noise - formulation exonerated. "
+          "If A-vs-A2 is MUCH smaller than A-vs-B, a systematic difference is "
+          "real - report the numbers.")
 
     outdir = os.path.join(REPO, "docs", "tools", "euler_parity_out")
     os.makedirs(outdir, exist_ok=True)
     from PIL import Image
     for k, v in results.items():
-        img = pipe.vae_decode_latents(v.to(dtype)) if hasattr(pipe, "vae_decode_latents") else None
-        if img is None:
-            lat_un = pipe._unpack_latents(v.to(dtype), H, W, pipe.vae_scale_factor) \
-                if hasattr(pipe, "_unpack_latents") else None
-            if lat_un is None:
-                print(f"  (decode helper not found; {k} saved as latent stats only)")
-                continue
-            lat_un = (lat_un / pipe.vae.config.scaling_factor) + getattr(
-                pipe.vae.config, "shift_factor", 0.0)
-            img = pipe.vae.decode(lat_un, return_dict=False)[0]
+        # Mirror of Krea2Pipeline.__call__'s decode block (Qwen image VAE:
+        # per-channel latents_mean/std denorm, 5D (B,C,T,H,W), take frame 0).
+        try:
+            lat_un = pipe._unpack_latents(v.to(dtype), H, W)
+            lat_un = lat_un.to(pipe.vae.dtype)
+            lm = (torch.tensor(pipe.vae.config.latents_mean)
+                  .view(1, pipe.vae.config.z_dim, 1, 1, 1)
+                  .to(lat_un.device, lat_un.dtype))
+            ls = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(
+                1, pipe.vae.config.z_dim, 1, 1, 1).to(lat_un.device, lat_un.dtype)
+            lat_un = lat_un / ls + lm
+            img = pipe.vae.decode(lat_un, return_dict=False)[0][:, :, 0]
+        except Exception as e:
+            print(f"  (decode skipped for {k}: {e})")
+            continue
         arr = ((img[0].float().permute(1, 2, 0).cpu().numpy().clip(-1, 1) + 1) * 127.5)
         Image.fromarray(arr.astype("uint8")).save(os.path.join(outdir, f"{k}.png"))
         print(f"  wrote {k}.png")

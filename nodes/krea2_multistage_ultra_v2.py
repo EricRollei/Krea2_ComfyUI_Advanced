@@ -243,10 +243,11 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                                    for k in c if k.endswith("_schedule")
                                    and k.split("_")[0] in _enabled})
                 if _collide:
-                    print(f"[EricKrea2-MS] [sweep] WARNING: the wired sigmas bundle "
-                          f"overrides {', '.join(_collide)} - those swept schedule "
-                          f"values are INERT on the bundle's enabled stage(s); cells "
-                          f"differing only there will produce identical images.")
+                    print(f"[EricKrea2-MS] [sweep] note: {', '.join(_collide)} is swept "
+                          f"while the wired sigmas bundle enables that stage - swept "
+                          f"schedule cells take precedence (the bundle's stage is "
+                          f"disabled per-cell so a swept axis is never silently inert; "
+                          f"2026-07-28 rule).")
         except Exception:
             pass
 
@@ -338,6 +339,25 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
             lb = ck.pop("lora_baseline", None)
             lt = ck.pop("lora_target", None)
             pr = ck.pop("prompt", None) if "prompt" in overrides else None
+            # Swept-schedule precedence (2026-07-28): a cell that explicitly
+            # sweeps a stage's schedule disables the wired bundle for that
+            # stage, cell-locally - a swept axis must never be silently inert
+            # (this trap fired three times; the warning alone wasn't enough).
+            _b = ck.get("sigmas")
+            if isinstance(_b, dict):
+                _hot = [st for st in ("s1", "s2", "s3")
+                        if f"{st}_schedule" in ck and isinstance(_b.get(st), dict)
+                        and _b[st].get("enabled", True)]
+                if _hot:
+                    _nb = dict(_b)
+                    for st in _hot:
+                        _nb[st] = dict(_nb[st])
+                        _nb[st]["enabled"] = False
+                    ck["sigmas"] = _nb
+                    cell_ctx["sigmas"] = {k2: v2 for k2, v2 in _nb.items()
+                                          if k2 in ("s1", "s2", "s3") and
+                                          isinstance(v2, dict) and
+                                          v2.get("enabled", True)}
             spf = ck.pop("sigma_profile", None)
             if pr is not None:
                 ck["prompt"] = pr
@@ -348,11 +368,20 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                 if _sigma_node is None:
                     from .krea2_sigmas import EricKrea2Sigmas
                     _sigma_node = EricKrea2Sigmas()
-                bundle = _sigma_node.build(sigmas_preset=str(spf))[0]
-                ck["sigmas"] = bundle
-                cell_ctx["sigmas"] = {k2: v2 for k2, v2 in bundle.items()
-                                      if k2 in ("s1", "s2", "s3") and
-                                      isinstance(v2, dict) and v2.get("enabled", True)}
+                from .. import _settings as _st
+                _pf = _st.load_presets("sigmas").get(str(spf), {})
+                _pf = _pf.get("sigmas", _pf) if isinstance(_pf, dict) else {}
+                if not _pf:
+                    # Never silently run panel defaults labelled as a profile:
+                    # that produced identical "EXP1..EXP6" cells (2026-07-27).
+                    print(f"[EricKrea2-Sweep] WARNING: sigma profile '{spf}' not found "
+                          f"or empty - cell runs the PANEL schedule instead (no bundle).")
+                else:
+                    bundle = _sigma_node.build(sigmas_preset=str(spf))[0]
+                    ck["sigmas"] = bundle
+                    cell_ctx["sigmas"] = {k2: v2 for k2, v2 in bundle.items()
+                                          if k2 in ("s1", "s2", "s3") and
+                                          isinstance(v2, dict) and v2.get("enabled", True)}
             if lora_cfg and (lb or lf is not None or (lt is not None and ls is not None)):
                 if lb:
                     # baseline: ladder -> panel stack as declared; bakeoff ->
@@ -371,6 +400,34 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                 pd["lora_stack"] = stack
                 ck["krea2_pipeline"] = pd
                 cell_ctx["lora"] = stack
+                # Trigger words for the cell's SWEEP-INJECTED entries only
+                # (baseline and ladder cells have no sweep_ entries and are
+                # untouched; the panel prompt is presumed already correct for
+                # the panel stack). Cached DB lookup; non-fatal on failure.
+                # A changed prompt forces re-encode for this cell.
+                trig_mode = str(lora_cfg.get("triggers", "off"))
+                if trig_mode != "off":
+                    try:
+                        from .._trigger_words import (get_trigger_words,
+                                                      merge_triggers_into_prompt)
+                        trigs, _seen = [], set()
+                        for e in stack:
+                            if str(e.get("adapter_name", "")).startswith("sweep_"):
+                                for t in get_trigger_words(e["path"]):
+                                    if t and t.lower() not in _seen:
+                                        _seen.add(t.lower())
+                                        trigs.append(t)
+                        if trigs:
+                            cur = str(ck.get("prompt", "") or "")
+                            merged = merge_triggers_into_prompt(cur, trigs, trig_mode)
+                            if merged != cur:
+                                ck["prompt"] = merged
+                                ck["prompt_conditioning"] = None
+                                cell_ctx["sweep_prompt"] = merged
+                                cell_ctx["sweep_triggers"] = trigs
+                    except Exception as _te:
+                        print(f"[EricKrea2-MS] [sweep] trigger lookup failed "
+                              f"(non-fatal): {_te}")
             return ck
 
         def _settings_with_cell(resolved):

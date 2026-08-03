@@ -77,16 +77,43 @@ class EricKrea2Sigmas:
             optional[f"{n}_beta"] = ("FLOAT", {"default": 0.7, "min": 0.05, "max": 6.0, "step": 0.05,
                 "tooltip": f"{label} advanced: Beta-distribution beta (only the 'beta' curve). "
                            "beta57 is fixed beta=0.7."})
+        # APPENDED LAST (2026-07-28): never insert widgets mid-list - ComfyUI
+        # saves widget values positionally and mid-list inserts scramble every
+        # saved workflow's values below the insert point.
+        optional["preset_notes"] = ("STRING", {"multiline": True, "default": "",
+            "tooltip": "One or two sentences: what this curve is FOR (which sampler / recipe) "
+                       "and what it does. Saved and loaded with the ★ preset."})
         return {"required": {}, "optional": optional}
 
     def build(self, sigmas_preset="custom", **kwargs):
         # Headless / API-run fallback: apply a named preset to the panel values
         # (the JS normally writes these into the visible widgets at edit time).
         if sigmas_preset and sigmas_preset != "custom":
-            _vals = dict(kwargs)
-            n = _settings.apply_named_preset("sigmas", sigmas_preset, _vals, set(_vals.keys()))
-            kwargs = _vals
-            print(f"[EricKrea2-Sigmas] sigmas_preset '{sigmas_preset}': applied {n} field(s).")
+            if not kwargs:
+                # HEADLESS (e.g. the sweep's sigma_profiles axis): the preset
+                # is the sole source of truth - apply every stored field
+                # (valid_keys=None; the old set(kwargs.keys()) allow-list was
+                # empty here, applied 0 fields, and silently built the widget
+                # defaults - found 2026-07-27).
+                _vals = {}
+                n = _settings.apply_named_preset("sigmas", sigmas_preset, _vals, None)
+                kwargs = _vals
+                _note = str(_vals.get("preset_notes", "")).strip()
+                print(f"[EricKrea2-Sigmas] sigmas_preset '{sigmas_preset}': "
+                      f"applied {n} field(s) (headless)."
+                      + (f' - "{_note}"' if _note else ""))
+                if n == 0:
+                    print(f"[EricKrea2-Sigmas] WARNING: preset '{sigmas_preset}' is "
+                          f"empty or missing - bundle uses PANEL DEFAULTS.")
+            else:
+                # GUI: widgets RULE. The JS wrote the preset's values into the
+                # widgets when it was selected, and anything the user changed
+                # since (e.g. flipping a stage's enable off) is intent. Never
+                # re-apply stored fields over live widgets at queue time -
+                # doing so let a dropdown left on a preset silently re-enable
+                # stages and stomp manual tweaks (found 2026-07-27: run-2
+                # sweep built-ins flattened by a re-applied EXP6 s1_enable).
+                pass
 
         bundle = {"krea2_sigmas_version": KREA2_SIGMAS_VERSION}
         for n in _STAGES:
