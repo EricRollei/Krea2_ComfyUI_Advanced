@@ -522,6 +522,10 @@ class EricKrea2SweepPlan:
                 if str(d.get(f"{st}_sampler", "")) in ("euler", "lcm"):
                     d.pop(f"{st}_eta", None)
                     d.pop(f"{st}_noise", None)
+                # er_sde: eta is inert (intrinsic churn) but NOISE TYPE is
+                # live - it shapes the churn - so only eta is dropped.
+                if str(d.get(f"{st}_sampler", "")) == "er_sde":
+                    d.pop(f"{st}_eta", None)
             # Per-stage hybrid steps: only the hybrids read them. If a cell
             # explicitly sets that stage's sampler to a non-hybrid, that
             # stage's hybrid_steps key is inert for the cell. (No explicit

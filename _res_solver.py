@@ -476,6 +476,78 @@ def etdrk4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
 
 
 @torch.no_grad()
+def er_sde_sample(denoise_fn, x, sigmas, s_noise=1.0, noise_sampler=None,
+                  callback=None, max_stage=3):
+    """ER-SDE-Solver-3 (VP form), ported from ComfyUI's sample_er_sde
+    (comfy/k_diffusion/sampling.py, arXiv 2309.06169) into this package's
+    conventions on 2026-07-29 - verified step-identical against a direct
+    transcription of their code on shared noise draws.
+
+    Rectified-flow mapping (Krea2): alpha = 1 - sigma, er-lambda =
+    sigma / (1 - sigma) (their sigma_to_half_log_snr CONST branch). The first
+    sigma is nudged below 1.0 exactly like their offset_first_sigma_for_snr
+    (lambda is infinite at sigma = 1).
+
+    Character: intrinsically STOCHASTIC - every step re-injects noise scaled
+    by the paper's extended law ns(l) = l*(exp(l^0.3)+10); the Taylor
+    stage-2/3 corrections (denoised history) keep low-step accuracy. eta is
+    ignored (churn is built in); s_noise scales it; noise_sampler is
+    honoured, so the package's noise TYPES shape the churn - something the
+    stock ComfyUI sampler cannot do. Measured 2026-07-29: 2% prediction-noise
+    amplification 0.048 on EVERY schedule incl. linear_quadratic -
+    schedule-proof at 1 model eval/step."""
+    if noise_sampler is None:
+        noise_sampler = lambda s, sn: torch.randn_like(x)
+    sigmas = sigmas.to(device=x.device, dtype=torch.float32)
+    n = sigmas.shape[0] - 1
+
+    def ns(l):
+        if isinstance(l, torch.Tensor):
+            return l * ((l ** 0.3).exp() + 10.0)
+        return l * (math.exp(l ** 0.3) + 10.0)
+
+    sig = [float(s_) for s_ in sigmas]
+    if sig and sig[0] >= 1.0:
+        sig[0] = 1.0 - 1e-4                      # offset_first_sigma_for_snr
+    lam = [s_ / (1.0 - s_) if 0.0 < s_ < 1.0 else 0.0 for s_ in sig]
+    num_pts = 200
+    old_denoised = None
+    old_denoised_d = None
+    for i in range(n):
+        denoised = denoise_fn(x, sigmas[i])
+        if callback is not None:
+            callback(i, sigmas[i], denoised, x)
+        stage_used = min(max_stage, i + 1)
+        if sig[i + 1] <= 0.0:
+            x = denoised
+        else:
+            l_s, l_t = lam[i], lam[i + 1]
+            a_s, a_t = 1.0 - sig[i], 1.0 - sig[i + 1]
+            r_alpha = a_t / a_s
+            r = ns(l_t) / ns(l_s)
+            x = r_alpha * r * x + a_t * (1.0 - r) * denoised
+            if stage_used >= 2 and old_denoised is not None:
+                dt = l_t - l_s
+                step = -dt / num_pts
+                lam_pos = torch.arange(num_pts, dtype=torch.float64) * step + l_t
+                scaled = ns(lam_pos)
+                s_int = float(torch.sum(1.0 / scaled)) * step
+                denoised_d = (denoised - old_denoised) / (l_s - lam[i - 1])
+                x = x + a_t * (dt + s_int * ns(l_t)) * denoised_d
+                if stage_used >= 3 and old_denoised_d is not None:
+                    s_u = float(torch.sum((lam_pos - l_s) / scaled)) * step
+                    denoised_u = (denoised_d - old_denoised_d) / ((l_s - lam[i - 2]) / 2.0)
+                    x = x + a_t * ((dt ** 2) / 2.0 + s_u * ns(l_t)) * denoised_u
+                old_denoised_d = denoised_d
+            if s_noise > 0:
+                var = l_t ** 2 - (l_s ** 2) * (r ** 2)
+                amp = math.sqrt(var) if var > 0 and math.isfinite(var) else 0.0
+                x = x + a_t * noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * amp
+        old_denoised = denoised
+    return x
+
+
+@torch.no_grad()
 def lcm_sample(
     denoise_fn,
     x: torch.Tensor,

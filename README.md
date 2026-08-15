@@ -47,6 +47,33 @@ No dependency on any other node pack.
 
 ## What's New
 
+**Late July 2026 (cont.) - field-calibrated scoring, preset UX, er_sde.**
+
+- **Field-calibrated metrics & captions** - clip% flags at absolute 4%/6%
+  thresholds, Tenengrad is the displayed/gated sharpness, splotch and noise
+  are demoted to CSV-only, contact-sheet captions use stage-grouped
+  shorthand with a compact wrapped metric line, and Auto Pick gained the
+  `most_typical` objective (consensus render) plus a uniqueness
+  consensus-outlier gate. Calibrated from two full 192-cell runs.
+- **Folder scoring chain** - the new `Eric Sweep Folder Scorer` (in
+  Eric-image-classification) grades a whole sweep with Blur V7 / Noise V4 /
+  composition / exposure / UniPercept and writes a merged `scores.csv` that
+  Auto Pick reads via `best_external`: sweep -> unload -> score -> pick ->
+  promote in one queue.
+- **Sweep presets that show themselves** - the Sweep Plan node joined the ★
+  preset system: selecting a preset writes its values into the panel,
+  editing flips back to `custom`, and a `preset_notes` field (also on the
+  Sigmas node) keeps a saved sentence about what each preset is for.
+- **`er_sde` sampler + `simple` scheduler** - a ComfyUI-faithful ER-SDE
+  Solver-3 port (verified step-identical): intrinsically stochastic, and
+  the only 1-eval/step sampler that is schedule-proof (amplification 0.048
+  on EVERY schedule incl. linear_quadratic). eta is ignored; the noise TYPE
+  shapes its churn (colored-noise er_sde is unique to this package).
+  `simple` = uniform-in-sigma, an alias of `linear`.
+- **Swept-schedule precedence** - swept schedule cells now disable a wired
+  sigmas bundle for that stage, cell-locally: a swept axis is never
+  silently inert.
+
 **Late July 2026 - parameter sweeps, hybrid samplers, inter-stage renorm.**
 
 - **Parameter sweep system** - wire an `Eric Krea2 Sweep Plan` into Ultra V2's
@@ -167,10 +194,11 @@ with group **bypass** (Ctrl+B) instead of juggling separate workflows. See
 *The Sigmas node: per-stage curve / `detail_bias` / Beta α-β overrides with a live sigma preview per stage (solid = steps that run, ring = re-noise level, ghost = full schedule).*
 
 Samplers (per stage, on the Ultra node): `euler`, `res_2m`, `res_2s`, `deis_3m`,
-`abnorsett_3m`, `abnorsett_4m`, `lawson4_4s`, `etdrk4_4s`, `rk6_7s`,
-`lcm`, `lcm_hybrid`, `lcm_hybrid2`.
+`abnorsett_3m`, `abnorsett_4m`, `lawson4_4s`, `etdrk4_4s`, `er_sde`,
+`rk6_7s`, `lcm`, `lcm_hybrid`, `lcm_hybrid2`.
 Schedules: `linear`, `balanced`, `karras`, `beta57`, `beta`,
-`bong_tangent`, `exponential`, `linear_quadratic`.
+`bong_tangent`, `exponential`, `linear_quadratic`, `simple`
+(= ComfyUI's uniform-in-sigma scheduler; alias of `linear` here).
 See [Samplers & schedules](#samplers--schedules).
 
 ### Sweeping & characterization
@@ -458,6 +486,7 @@ pair looks BEST for a given fine tune is what the sweep decides.
 | `deis_3m` | exponential/beta57/beta/karras (0.022-0.025), `OPT-DEIS12` ★ (karras +0.75 bias, 0.023) | bong_tangent/balanced (~0.03), linear (0.118) | linear_quadratic (0.834) |
 | `abnorsett_3m` | beta57/beta (0.021), exponential/karras (0.022-0.025) | linear (0.060), linear_quadratic (0.115) | - |
 | `abnorsett_4m` | beta57/beta (0.022), `OPT-AB412` ★ (beta57 +0.5 bias) | exponential/karras (~0.03), linear_quadratic (0.178) | - |
+| `er_sde` | ANY - 0.048 flat on every schedule incl. linear_quadratic (stochastic contraction; schedule-proof at 1 eval/step). Community recipe: + `simple` @ 8 steps | - | - |
 | `lcm_hybrid`/`2` | beta57/beta/karras/exponential (0.023-0.028) + the EXP ★ family | bong_tangent (~0.026) | linear (0.055-0.116), linear_quadratic (~0.15) |
 
 Detail-bias windows (how far you can push `detail_bias` before conditioning
@@ -747,16 +776,35 @@ globally under `seed_mode=same_all_stages`).
 - `sweep_manifest.json` - full resolved recipes, timings, metrics, errors.
 
 **Scores** (optional, CPU, milliseconds - failure detectors, not beauty
-judges): Laplacian + Tenengrad sharpness (disagreement flags oversharpening),
-wavelet noise sigma, flat-region chroma variance (splotch/turbo-residue
-detector), clip fraction. `sort_by` pre-sorts the sheet; scores never hide a
-cell - the eye stays the judge.
+judges): Laplacian + Tenengrad sharpness, wavelet noise sigma, flat-region
+chroma variance, clip fraction. All land in the CSV/manifest; `sort_by`
+pre-sorts the sheet; scores never hide a cell - the eye stays the judge.
 
-**Uniqueness** (model-free, automatic): every cell also gets a
+**Field calibration** (two full 192-cell characterization runs, 2026-07-29):
+**clip%** is the best bad-image predictor - above 3-4% suspect, above 6%
+almost always bad (the sheet flags `C4.2%!` / `C7.1%!!` at exactly those
+absolute thresholds, and Auto Pick's gates use them). **sharp_ten**
+(Tenengrad) proved more trustworthy than Laplacian - it is the sharpness
+shown on the sheet and gated by Auto Pick - though neither is immune to one
+strong edge dominating; subject/tiled sharpness via the external `scores.csv`
+route is the real answer there. **noise sigma** and **splotch** showed no
+quality discrimination in the field - they remain CSV columns but gate
+nothing and no longer appear on the sheet.
+
+**Sheet captions** are stage-grouped shorthand - one line per swept stage
+(`s1: 2.5mp res_2m+beta57 h7 e0.3`), ★profile / seed / prompt on a trailing
+line - plus a compact metric line: `T88s  S11.3k  C0.5%  N1.0  U159`
+(T time, S sharp_ten/1000, C clip% with the !/!! flags, N noise, U
+uniqueness).
+
+**Uniqueness** (model-free, automatic): every cell gets a
 composition-uniqueness score - its mean distance from the other cells'
-64x64 luma thumbnails, grouped per prompt block. At the sweep's fixed seed
-this distance IS composition divergence, so "which settings actually change
-the picture" becomes a sortable column (sheet, CSV, manifest, `sort_by`).
+64x64 luma thumbnails, grouped per (prompt, S1 megapixels). READ THE
+DIRECTION BY EXPERIMENT TYPE: in a fixed-seed SETTINGS sweep, high
+uniqueness means "deviates from the consensus" and broken cells deviate
+hardest - the LOW end is the consensus render and the high end is an
+outlier list; in a SEED sweep, divergence is the point and high = more
+compositional variety. Auto Pick has an objective for each direction.
 
 **Promotion:** `Eric Krea2 Sweep → Preset` reads a manifest cell into
 `ultra_presets.json` (swept keys only, or the full recipe), auto-tagged with
@@ -803,17 +851,52 @@ finalize the files on disk before stopping the queue item.
 
 **Auto Pick:** `Eric Krea2 Sweep Auto Pick` closes the loop from sweep to
 preset: manifest in, `cell_index` + a human-readable report out. Objectives:
-`fastest_acceptable` (fastest cell passing quality gates - gates
-self-calibrate against the sweep median, or against an eye-picked
-`reference_cell`, with a `tolerance` slack), `most_unique` (highest
-composition-uniqueness; recomputed from the cell PNGs for older sweeps),
-`best_metric` (any built-in column), and `best_external` (any column of a
-`scores.csv` you drop into the sweep folder from external scoring tools -
-UniPercept, subject-sharpness, grain-aware analysis - joined by filename).
+`fastest_acceptable` (fastest cell passing the field-calibrated gates:
+clip% ABSOLUTE - reject above 6%, flag 4-6% as suspect-but-passing;
+sharp_ten relative to the sweep median or an eye-picked `reference_cell`
+with `tolerance` slack; and a uniqueness consensus-outlier gate - cells far
+above the reference are rejected as deviants, with 2x tolerance so style
+variation passes), `most_unique` (highest composition-uniqueness - the SEED
+sweep objective; recomputed from cell PNGs for older manifests),
+`most_typical` (LOWEST uniqueness - the consensus render, the right pick in
+settings sweeps where high uniqueness flags broken outliers), `best_metric`
+(any built-in column), and `best_external` (any column of a `scores.csv` in
+the sweep folder, joined by filename - blank metric = first numeric column).
 Wire `cell_index` into Sweep -> Preset (convert its widget to an input) and
 one queue runs sweep -> pick -> promote. The picker proposes and explains
 its choice with runners-up; promotion only happens because you queued the
 preset node - metrics never silently write your preset library.
+
+**Folder scoring chain:** the `Eric Sweep Folder Scorer` node (in the
+Eric-image-classification package) consumes the manifest path and grades
+every cell with the analyzer suite - Blur V7, Noise V4, composition,
+exposure, UniPercept (with a `device` picker for the second GPU) - and
+writes/merges `scores.csv` in the sweep folder, one column per numeric
+output (`comp.composition_score`, `blur7.variance`, ...). Merging is by
+filename, so multiple grading passes stack columns instead of clobbering.
+The full hands-off chain is: Ultra V2 `sweep_manifest` -> `Krea2 Unload`
+(frees the generator's VRAM; its wildcard passthrough keeps the ordering) ->
+`Sweep Folder Scorer` -> `Auto Pick` (`best_external`) -> `Sweep -> Preset`:
+one queue from characterization to a machine-proposed, human-ratified
+preset.
+
+**Sweep presets, the toggle & notes:** the Sweep Plan node carries an
+`enabled` switch (off = the wired node is inert and normal generation runs)
+and a `sweep_preset` dropdown backed by `sweep_presets.json`. Selecting a
+preset WRITES its values into the panel - you always see exactly what will
+run - and editing any field flips the dropdown back to `custom`; the ★ Save
+Preset button saves the panel under a new name. Headless/API runs apply the
+named preset as the sole source. Both the Sweep Plan and Sigmas nodes carry
+a `preset_notes` field saved with each ★ preset - one sentence on what the
+preset is FOR - written into the panel on select and printed by headless
+runs, so preset libraries stay self-documenting.
+
+**Swept schedules vs a wired sigmas bundle:** a cell that explicitly sweeps
+a stage's schedule disables the wired bundle for that stage, cell-locally -
+a swept axis is never silently inert (the bundle previously overrode swept
+schedules, which produced identical cells and only a warning). Unswept
+stages keep the bundle; `sigma_profiles` cells replace it entirely; each
+cell's PNG chunk records what actually applied.
 
 ## Notes
 

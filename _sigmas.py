@@ -38,7 +38,7 @@ import math
 import numpy as np
 
 CURVES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent", "exponential",
-          "linear_quadratic"]
+          "linear_quadratic", "simple"]
 
 
 def _rho_from_bias(base_rho: float, bias: float, rho) -> float:
@@ -160,6 +160,11 @@ def build_sigmas(num_steps, denoise=1.0, curve="linear", *, bias=0.0, rho=None,
 
     t = np.linspace(0.0, 1.0, keep)
     curve = (curve or "linear").lower()
+    if curve == "simple":
+        # ComfyUI's "simple" scheduler is uniform-in-sigma - identical to this
+        # package's "linear". Accepted as an alias so community recipes
+        # (er_sde + simple @ 8 steps etc.) translate 1:1. (2026-07-29)
+        curve = "linear"
 
     if curve in ("karras", "balanced"):
         base = 3.0 if curve == "balanced" else 7.0

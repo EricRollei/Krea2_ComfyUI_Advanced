@@ -40,15 +40,17 @@ from .._latent_utils import (
 from .._upscale_vae import upscale_between_stages, decode_latents_with_upscale_vae
 from .._res_solver import (res_multistep_sample, res_2s_sample, deis_sample,
                            rk_explicit_sample, lcm_sample, lcm_hybrid_sample,
-                           abnorsett_sample, lawson4_sample, etdrk4_sample)
+                           abnorsett_sample, lawson4_sample, etdrk4_sample,
+                           er_sde_sample)
 from .. import _sigmas
 from .. import _telemetry
 
 _VAE_SCALE_FACTOR = 8  # AutoencoderKLQwenImage is f8
 _SCHEDULES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent",
-              "exponential", "linear_quadratic"]
+              "exponential", "linear_quadratic", "simple"]
 _SAMPLERS = ["euler", "res_2m", "res_2s", "deis_3m", "abnorsett_3m", "abnorsett_4m",
-             "lawson4_4s", "etdrk4_4s", "rk6_7s", "lcm", "lcm_hybrid", "lcm_hybrid2"]
+             "lawson4_4s", "etdrk4_4s", "er_sde", "rk6_7s", "lcm", "lcm_hybrid",
+             "lcm_hybrid2"]
 _NOISE_TYPES = ["white", "low_freq", "high_freq", "pink"]
 _NOISE_STRENGTH = 0.30  # how far non-white noise leans from white (kept low so the
                         # flow-match denoiser, trained on white noise, can still clean it)
@@ -478,6 +480,12 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
                                order=(3 if method == "abnorsett_3m" else 4),
                                eta=float(eta or 0.0),
                                noise_sampler=noise_sampler, callback=_cb)
+    elif method == "er_sde":
+        # Intrinsically stochastic (its own churn law) - eta is IGNORED by
+        # contract; the stage's noise_sampler shapes the churn (colored noise
+        # works, unlike stock ComfyUI's er_sde).
+        out = er_sde_sample(denoise_fn, x, sigmas,
+                            noise_sampler=noise_sampler, callback=_cb)
     elif method == "lawson4_4s":
         out = lawson4_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
                              noise_sampler=noise_sampler, callback=_cb)
@@ -652,7 +660,11 @@ class EricKrea2MultistageUltra:
                                "and stable on every schedule incl. linear_quadratic (the kreamania "
                                "pass-2 style pick). lawson4_4s / etdrk4_4s: single-step exponential "
                                "RK order 4, 4 calls/step, no history - the most noise-robust "
-                               "solvers here, stable everywhere; strong on refine windows. All but "
+                               "solvers here, stable everywhere; strong on refine windows. er_sde: "
+                               "ER-SDE-Solver-3 (ComfyUI-faithful port) - stochastic, re-injects "
+                               "scaled noise every step; strong at LOW step counts (community "
+                               "recipe: er_sde + simple schedule, 8 steps); eta ignored (own "
+                               "churn), noise type shapes the churn. All but "
                                "euler honour a noisy early end_step. rk6_7s: 6th-order 7-stage "
                                "explicit Runge-Kutta - highest solver accuracy, ~7x model calls "
                                "per step (the kreamania finetuner pass-1 recipe with "
