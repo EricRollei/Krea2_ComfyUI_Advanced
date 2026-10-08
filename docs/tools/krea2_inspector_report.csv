@@ -1,0 +1,39 @@
+file,GB,layout,formats,now,after_fix,why,notes,converter
+3091496_darkbeastint8convrot2_krea211int8convrot.safetensors,14.1,comfy,"int8_tensorwisex224, plainx40",OK,OK,,,
+3107017_dasiwakrea2_mirroredskiesv1turbo.safetensors,14.1,bare,"int8_tensorwisex224, plainx40",OK,OK,,,
+3116204_artaix_v10krea2.safetensors,12.8,comfy,fp8_barex423,OK,OK,,,
+3140184_pornmasterkrea2_v2turbobf16.safetensors,26.3,comfy,plainx264,OK,OK,,,
+3249241_rayartshoot_krea2nsfwv4_3132383.safetensors,26.3,comfy,plainx264,OK,OK,,,
+3258954_musebystableyogi_v35int8extended.safetensors,13.5,bare,"int8_tensorwisex224, plainx40",OK,OK,,,
+3286116_fasciumkrea2_exp01092026_3170580.safetensors,26.3,bare,plainx264,OK,OK,,,
+3298149_kreation_variant3_3183208.safetensors,13.9,comfy,"mxfp8x224, plainx40",FAIL,OK,mxfp8 unsupported (blocks.0.attn.gate.weight) (+223 more),,ComfyUI Kitchen NVFP4 Converter
+3305034_cyberrealistickrea2_v30_BF16_3190059.safetensors,25.6,comfy,plainx264,OK,OK,,,
+3308642_loxsutopicworldkrea2_v30bf16.safetensors,25.6,bare,plainx264,OK,OK,,,
+3317204_krea2satiorimitationof_krea2satiorv3_3202897.safetensors,13.1,comfy,"float8_e4m3fnx256, plainx8",OK,OK,,,
+3320158_krea2finalcut_universalv3_3205805.safetensors,27.0,bare,plainx264,OK,OK,,,
+3322823_jibmixkrea_v50ghostpepper_3214491.safetensors,25.6,comfy,plainx264,OK,OK,,,dequantize_comfy_int8_to_bf16.py
+3347802_krealism_v31turbobf16.safetensors,26.3,comfy,plainx264,OK,OK,,,
+3357324_godago_v20_3244980.safetensors,13.5,bare,"int8_tensorwisex224, plainx40",OK,OK,,,
+3365025_darkbeast5csep0buzzh3_beast5csepfreek2t_3253043.safetensors,13.5,bare,"int8_tensorwisex224, plainx40",OK,OK,,,
+3377061_kreation_variant4_3265715.gguf,9.1,gguf,"gguf_Q4_1x256, gguf_F32x174",OK,OK,,arch=krea2,
+3377061_kreation_variant4_3266135.safetensors,13.5,comfy,"int8_tensorwisex224, plainx40",OK,OK,,,ComfyUI Kitchen NVFP4 Converter
+3378023_rayartshoot_krea2nsfwv5int8c.safetensors,12.8,comfy,int8_tensorwisex264,OK,OK,,,
+3387367_fasciumkrea2_masterpieceedition3_3276333.safetensors,13.1,bare,"int8_tensorwisex256, plainx8",OK,OK,,,Star Ultimate Model Converter
+dafK2T_v1.safetensors,12.8,comfy,fp8_barex430,OK,OK,,,
+darkBeast30BF16INT8_darkBeast330.safetensors,26.3,comfy,plainx264,OK,OK,,,
+darkBeastINT8Convrot2_darkBeastKREA2FP8.safetensors,12.8,comfy,fp8_barex430,OK,OK,,,
+fasciumKREA2_nsfwMERGE.safetensors,26.3,bare,plainx264,OK,OK,,,
+krea2-bbox-turbo-comfy-latest.safetensors,26.3,bare,plainx264,OK,OK,,,
+krea2_raw_bf16.safetensors,26.3,bare,plainx264,OK,OK,,,
+krea2_turbo_bf16.safetensors,26.3,bare,plainx264,OK,OK,,,
+krea2GPTGrandPUSSYTruth_gptINT4INT8Convrot.safetensors,13.1,comfy,"int8_tensorwisex256, plainx8",OK,OK,,,Star Ultimate Model Converter
+kreamania_variant3.safetensors,26.3,comfy,plainx264,OK,OK,,,
+kreamania_variant4.safetensors,26.3,comfy,plainx264,OK,OK,,,
+kreamania_variant5.safetensors,26.3,comfy,plainx264,OK,OK,,,
+kreamania_variant8_mxfp8.safetensors,13.9,comfy,"mxfp8x224, plainx40",FAIL,OK,mxfp8 unsupported (blocks.0.attn.gate.weight) (+223 more),,ComfyUI Kitchen NVFP4 Converter
+kreation_v1.safetensors,12.8,comfy,int8_tensorwisex264,OK,OK,,,
+myAkrapovicKrea2_x10.safetensors,13.5,bare,"int8_tensorwisex224, plainx40",OK,OK,,,
+ramthrustsPINKALCHEMY_v20Slop.safetensors,12.8,comfy,int8_tensorwisex264,OK,OK,,,
+redcraftMinimaxH3REDMIX_30Krea2.safetensors,12.8,comfy,"int8_tensorwisex262, plainx2",OK,OK,,,Star Ultimate Model Converter
+sinoxeditKrea2Uncen_editV10FP8Scaled.safetensors,13.1,comfy,"float8_e4m3fnx256, plainx8",OK,OK,,,
+unstablebastard_bastardkrea2.safetensors,13.5,comfy,"int8_tensorwisex224, plainx40",OK,OK,,,

@@ -435,17 +435,20 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
     def denoise_fn(xx, sigma):
         xin = xx.to(dtype)                      # model dtype (e.g. bf16); accumulator stays fp32
         ts = sigma.to(dtype).expand(xin.shape[0])   # timestep == shifted sigma (t / num_train)
+        pipe.transformer._eric_cfg_pass = "pos"      # read by _edit_guidance (edit/NAG/NegPiP)
         v = pipe.transformer(
             hidden_states=xin, encoder_hidden_states=prompt_embeds, timestep=ts,
             position_ids=position_ids, encoder_attention_mask=prompt_mask,
             attention_kwargs=None, return_dict=False,
         )[0]
         if do_cfg:
+            pipe.transformer._eric_cfg_pass = "neg"
             vneg = pipe.transformer(
                 hidden_states=xin, encoder_hidden_states=neg_embeds, timestep=ts,
                 position_ids=position_ids, encoder_attention_mask=neg_mask,
                 attention_kwargs=None, return_dict=False,
             )[0]
+            pipe.transformer._eric_cfg_pass = "pos"
             v = v + guidance_scale * (v - vneg)
         return xin - sigma.to(dtype) * v          # velocity -> x0
 
@@ -878,6 +881,46 @@ class EricKrea2MultistageUltra:
                 "s3_hybrid_steps": ("INT", {"default": 0, "min": 0, "max": 98,
                     "tooltip": "Stage 3 hybrid handoff in exact lcm steps (0 = auto half). "
                                "See s1_hybrid_steps."}),
+                # Appended 2026-10-07 at the END of optional (positional widgets_values safety).
+                "degrid": (["off", "hops", "final", "hops+final"], {"default": "off",
+                    "tooltip": "Remove the VAE's 2-pixel lattice (DeGrid notch filter; auto-calibrated, "
+                               "edge-protected, untouched when no grid is detected).\n"
+                               "hops: on the inter-stage VAE upscale (s1_s2_upscale_vae / S2->S3 VAE "
+                               "modes) BEFORE re-encoding, so the upscale VAE's pixel_shuffle lattice "
+                               "is never baked into the next stage's latent. No effect on plain "
+                               "latent (bislerp) hops - they have no pixel step.\n"
+                               "final: on the decoded output image.\n"
+                               "Console prints the measured grid amplitude per pass."}),
+                # Appended 2026-10-07: a SOCKET (no widgets_values slot) - positionally safe.
+                "control": ("KREA2_CONTROL", {
+                    "tooltip": "Optional Control-LoRA bundle (from Eric Krea2 Control): depth / pose / "
+                               "canny ... structure control. Per-stage strengths live on that node "
+                               "(0 = stage runs the stock model). The control image is re-encoded at "
+                               "each controlled stage's own resolution."}),
+                # Appended 2026-10-07: a SOCKET (no widgets_values slot) - positionally safe.
+                "style": ("KREA2_STYLE", {
+                    "tooltip": "Optional training-free style reference (from Eric Krea2 Style "
+                               "Reference). Per-stage multipliers live on that node (default S1 "
+                               "only). ~2.3-2.6x per styled step. Not combinable with ref_latents."}),
+                # Appended 2026-10-08: a SOCKET (no widgets_values slot) - positionally safe.
+                "paint": ("KREA2_PAINT", {
+                    "tooltip": "Optional inpaint / outpaint bundle (from Eric Krea2 Paint). Stage 1 "
+                               "follows the canvas aspect at s1_megapixels unless width/height are "
+                               "set. Kept regions are pinned to the source (per-stage on that node). "
+                               "Put the AnyPaint LoRA on the LoRA stack (S1 only). Not combinable "
+                               "with style or ref_latents."}),
+                # Appended 2026-10-08: SOCKETS (no widgets_values slot) - positionally safe.
+                "edit": ("KREA2_EDIT", {
+                    "tooltip": "Optional instruction / identity edit (from Eric Krea2 Edit; Krea 2 "
+                               "Identity Edit recipe). Put the edit LoRA on the LoRA stack, S1 = 1. "
+                               "Stage 1 only (<= 2 MP); S2/S3 refine with this node's prompt text "
+                               "(or the instruction when empty). Not combinable with ref_latents, "
+                               "style or paint."}),
+                "guidance": ("KREA2_GUIDANCE", {
+                    "tooltip": "Optional negative guidance (from Eric Krea2 Negative Guidance): NAG "
+                               "(negative prompt that works at guidance 0) and/or NegPiP "
+                               "((phrase:-1) in the prompt). Combinable with each other and with "
+                               "edit; skipped with style / paint / ref_latents."}),
             },
         }
 
@@ -950,6 +993,32 @@ class EricKrea2MultistageUltra:
         # (e.g. from EricKrea2VisionPrompt) gets the SAME rebalance applied directly -
         # the encode_prompt wrap below only fires for the plain prompt-string path,
         # since a vision conditioning never calls encode_prompt at all.
+        # Edit / negative guidance (2026-10-08): encode once (grounded instruction, NAG
+        # negative, NegPiP weights, fitted sources) BEFORE cond_rebalance so the rebalance
+        # reaches the precomputed positive. Installed inside the try below.
+        edit_bundle = kwargs.pop("edit", None)
+        guide_bundle = kwargs.pop("guidance", None)
+        self._eg_rt = None
+        _has_edit = isinstance(edit_bundle, dict) and bool(edit_bundle.get("images"))
+        _busy = [k for k in ("ref_latents", "style", "paint") if isinstance(kwargs.get(k), dict)
+                 and (kwargs.get(k).get("packed") or kwargs.get(k).get("image") is not None
+                      or kwargs.get(k).get("known") is not None)]
+        if _has_edit and _busy:
+            raise ValueError(f"[EricKrea2-Edit] edit cannot be combined with {_busy} (each "
+                             "wraps the transformer forward) - use one per run.")
+        if isinstance(guide_bundle, dict) and any(k in _busy for k in ("style", "paint", "ref_latents")):
+            print("[EricKrea2-EditGuide] negative guidance is skipped with style / paint / ref_latents "
+                  "(each owns the transformer forward) - disconnect one of them.")
+            guide_bundle = None
+        if _has_edit or isinstance(guide_bundle, dict):
+            from .._edit_install import prepare_edit_guidance
+            try:
+                self._eg_rt = prepare_edit_guidance(pipe, kwargs, edit_bundle if _has_edit else None,
+                                                    guide_bundle, _resolve_s1_dims)
+            except Exception:
+                if lora_stack and any(e.get("ephemeral", True) for e in lora_stack):
+                    unload_all_loras(pipe)
+                raise
         reb_orig, reb_lw, reb_mult = self._install_cond_rebalance(pipe, kwargs)
         pc = kwargs.get("prompt_conditioning")
         if reb_lw is not None and isinstance(pc, dict) and pc.get("embeds") is not None:
@@ -980,9 +1049,52 @@ class EricKrea2MultistageUltra:
             elif ref_match_size:
                 ref_bundle = resize_ref_bundle_to_dims(pipe, ref_bundle, s1_w, s1_h)
             ref_orig = install_ref_latents(pipe, ref_bundle, recipe=ref_recipe)
+        # Control-LoRA (opt-in): forward hooks only (expanded img_in + block LoRA
+        # deltas), switched per stage from _lora_stage, removed in finally.
+        control_bundle = kwargs.pop("control", None)
+        style_bundle = kwargs.pop("style", None)
+        paint_bundle = kwargs.pop("paint", None)
+        self._control_rt = None
+        self._style_rt = None
+        self._paint_rt = None
+        self._te_offload = None
         try:
+            if isinstance(control_bundle, dict) and control_bundle.get("path"):
+                from .._control import ControlRuntime
+                self._control_rt = ControlRuntime(pipe, control_bundle)
+                self._control_rt.install()
+            if isinstance(style_bundle, dict) and style_bundle.get("image") is not None:
+                if ref_orig is not None:
+                    raise ValueError("[EricKrea2-Style] style reference and ref_latents both wrap the "
+                                     "transformer - use one of them per run.")
+                from .._style_ref import StyleRuntime
+                self._style_rt = StyleRuntime(pipe, style_bundle)
+                self._style_rt.install()
+                self._te_offload = self._offload_text_encoder(pipe, krea2_pipeline, kwargs, "style")
+            if isinstance(paint_bundle, dict) and paint_bundle.get("known") is not None:
+                self._paint_rt = self._install_paint(pipe, paint_bundle, kwargs, lora_stack,
+                                                     ref_orig is not None or self._style_rt is not None)
+            if self._eg_rt is not None:
+                self._eg_rt.install()
+                if self._eg_rt.edit and self._te_offload is None:
+                    self._te_offload = self._offload_text_encoder(pipe, krea2_pipeline, kwargs, "edit")
             return self._generate_inner(**kwargs)
         finally:
+            if getattr(self, "_eg_rt", None) is not None:
+                self._eg_rt.remove()
+                self._eg_rt = None
+            if self._te_offload is not None:
+                self._restore_text_encoder(pipe, self._te_offload)
+                self._te_offload = None
+            if self._paint_rt is not None:
+                self._paint_rt.remove()
+                self._paint_rt = None
+            if self._style_rt is not None:
+                self._style_rt.remove()
+                self._style_rt = None
+            if self._control_rt is not None:
+                self._control_rt.remove()
+                self._control_rt = None
             if ref_orig is not None:
                 pipe.transformer.forward = ref_orig
             if reb_orig is not None:
@@ -990,6 +1102,93 @@ class EricKrea2MultistageUltra:
             if lora_stack and any(e.get("ephemeral", True) for e in lora_stack):
                 unload_all_loras(pipe)
             self._lora_runtime = None
+
+    @staticmethod
+    def _offload_text_encoder(pipe, krea2_pipeline, kwargs, why, vram_limit_gb=64.0):
+        """2026-10-08: style doubles the transformer batch, which overflows 48 GB cards with the
+        ~8 GB Qwen3-VL encoder resident. On cards below vram_limit_gb, when no stage uses CFG
+        (Turbo + turbo_guidance=off), encode the positive prompt ONCE (through the possibly
+        rebalance-wrapped encode_prompt - identical to what every stage would compute), feed it
+        as prompt_conditioning, and park the encoder on the CPU for the run. The pipeline's
+        execution device is pinned to the transformer's device while the encoder is away
+        (diffusers infers it from an unordered component set). Returns restore state or None."""
+        try:
+            tr_dev = next(pipe.transformer.parameters()).device
+            te = getattr(pipe, "text_encoder", None)
+            if te is None or tr_dev.type != "cuda":
+                return None
+            total_gb = torch.cuda.get_device_properties(tr_dev).total_memory / 1e9
+            if total_gb >= float(vram_limit_gb):
+                return None
+            distilled = bool(krea2_pipeline.get("is_distilled", False))
+            if not (distilled and str(kwargs.get("turbo_guidance", "off")) == "off"):
+                print(f"[EricKrea2-MS] {why}: {total_gb:.0f} GB card but guidance is active - the "
+                      "text encoder stays on the GPU (negative prompt needs it); may run out of VRAM.")
+                return None
+            pc = kwargs.get("prompt_conditioning")
+            if not (isinstance(pc, dict) and pc.get("embeds") is not None):
+                emb, msk = pipe.encode_prompt(prompt=kwargs.get("prompt", ""), device=tr_dev,
+                                              num_images_per_prompt=1)
+                kwargs["prompt_conditioning"] = {"embeds": emb, "mask": msk}
+            te_dev = next(te.parameters()).device
+            orig_cls = pipe.__class__
+            pipe.__class__ = type(orig_cls.__name__, (orig_cls,),
+                                  {"_execution_device": property(lambda s, _d=tr_dev: _d)})
+            te.to("cpu")
+            torch.cuda.empty_cache()
+            print(f"[EricKrea2-MS] {why} on a {total_gb:.0f} GB card: prompt encoded once, text "
+                  "encoder parked on the CPU for this run (restored after).")
+            return (te, te_dev, orig_cls)
+        except Exception as e:
+            print(f"[EricKrea2-MS] text-encoder offload skipped ({type(e).__name__}: {e})")
+            return None
+
+    @staticmethod
+    def _restore_text_encoder(pipe, state):
+        te, te_dev, orig_cls = state
+        try:
+            pipe.__class__ = orig_cls
+            te.to(te_dev)
+        except Exception as e:
+            print(f"[EricKrea2-MS] WARNING: text encoder restore failed ({type(e).__name__}: {e})")
+
+    @staticmethod
+    def _install_paint(pipe, paint_bundle, kwargs, lora_stack, other_wrap):
+        """Inpaint / outpaint (2026-10-08): size S1 to the canvas, sanity-check the LoRA,
+        install _paint.PaintRuntime. Mutates kwargs (width/height, crop_bottom)."""
+        if other_wrap:
+            raise ValueError("[EricKrea2-Paint] paint cannot be combined with style or ref_latents "
+                             "(each wraps the transformer forward) - use one per run.")
+        cw, ch = paint_bundle["canvas"]
+        if int(kwargs.get("crop_bottom", 0) or 0) > 0:
+            print("[EricKrea2-Paint] crop_bottom disabled for this run (a guard band would stretch "
+                  "the canvas registration).")
+            kwargs["crop_bottom"] = 0
+        explicit = int(kwargs.get("width", 0) or 0) > 0 and int(kwargs.get("height", 0) or 0) > 0
+        from_init = kwargs.get("init_latent") is not None and kwargs.get("init_match_size", True)
+        if not explicit and not from_init:
+            mp = float(kwargs.get("s1_megapixels", 3.0))
+            a = cw / float(ch)
+            h = (mp * 1_000_000.0 / a) ** 0.5
+            kwargs["width"], kwargs["height"] = _round16(h * a), _round16(h)
+            print(f"[EricKrea2-Paint] Stage 1 sized to the canvas aspect ({cw}x{ch}) at {mp:g} MP "
+                  f"-> {kwargs['width']}x{kwargs['height']}")
+        else:
+            w, h = int(kwargs.get("width", 0) or cw), int(kwargs.get("height", 0) or ch)
+            if abs((w / float(h)) / (cw / float(ch)) - 1.0) > 0.03:
+                print(f"[EricKrea2-Paint] WARNING: Stage 1 aspect {w}x{h} differs from the canvas "
+                      f"{cw}x{ch} - the canvas will be stretched to fit.")
+        ad = paint_bundle.get("adapter", "none")
+        if ad != "none":
+            names = " ".join(str(e.get("path", "")).lower() for e in (lora_stack or []))
+            if ad not in names:
+                print(f"[EricKrea2-Paint] WARNING: adapter={ad} but no LoRA with '{ad}' in its name "
+                      "is on the LoRA stack - the reference K/V will be built from the plain model "
+                      "(add krea2_{ad}_rank32 to the Multi-LoRA stack, S1 = 1).")
+        from .._paint import PaintRuntime
+        rt = PaintRuntime(pipe, paint_bundle)
+        rt.install()
+        return rt
 
     @staticmethod
     def _load_cond_presets():
@@ -1084,8 +1283,11 @@ class EricKrea2MultistageUltra:
                  decode_vae=None, preview_stages=False, sigmas=None,
                  distilled_shift="fixed", shift_mu_s1=1.15, shift_mu_s2=1.15, shift_mu_s3=1.15,
                  upscale_renorm="off", s1_hybrid_steps=0, s2_hybrid_steps=0,
-                 s3_hybrid_steps=0, _s1_reuse=None):
+                 s3_hybrid_steps=0, degrid="off", _s1_reuse=None):
         pipe = krea2_pipeline["pipeline"]
+        _degrid_mode = str(degrid or "off")
+        _degrid_hops = _degrid_mode in ("hops", "hops+final")
+        _degrid_final = _degrid_mode in ("final", "hops+final")
         is_distilled = krea2_pipeline.get("is_distilled", False)
         # Distilled shift policy (2026-07-21): per-stage mu for Turbo models - see
         # _compute_mu. Always announce the resolved mode so the active policy is
@@ -1130,6 +1332,18 @@ class EricKrea2MultistageUltra:
             if rt and rt[0]:
                 from .._lora_utils import set_stack_stage_weights
                 set_stack_stage_weights(pipe, rt[0], rt[1], idx)
+            crt = getattr(self, "_control_rt", None)
+            if crt is not None:
+                crt.set_stage(idx)
+            srt = getattr(self, "_style_rt", None)
+            if srt is not None:
+                srt.set_stage(idx)
+            prt = getattr(self, "_paint_rt", None)
+            if prt is not None:
+                prt.set_stage(idx)
+            ert = getattr(self, "_eg_rt", None)
+            if ert is not None:
+                ert.set_stage(idx)
 
         if is_distilled:
             if turbo_guidance == "off":
@@ -1435,7 +1649,12 @@ class EricKrea2MultistageUltra:
             print(f"[EricKrea2-MS] -- Stage 1: {s1_w}x{s1_h}, {s1_steps} steps, "
                   f"guidance={s1_cfg}, {_s1_label}/{s1_noise}, sampler={s1_sampler}{_crop_msg} --")
             _telem.begin("Stage 1")
-            if s1_sampler != "euler":
+            # Paint (2026-10-08): the stock pipe(...) Euler loop keeps latents in bf16; the paint
+            # adapters' reference behaviour is an fp32 trajectory (parity 17 dB -> 36 dB vs the
+            # author's pipeline). With paint active, Euler runs on our solver (fp32 accumulator,
+            # Euler as a 1-stage RK). Non-paint runs are unchanged (seed-reproducible).
+            if (s1_sampler != "euler" or getattr(self, "_paint_rt", None) is not None
+                    or getattr(self, "_eg_rt", None) is not None):
                 cur_lat = _res_denoise_packed(pipe, prompt, neg, s1_h, s1_w, s1_init, s1_sigmas,
                                               is_distilled, float(s1_cfg), float(s1_eta), gen_s1,
                                               progress_cb=_res_progress, method=s1_sampler,
@@ -1467,7 +1686,8 @@ class EricKrea2MultistageUltra:
             _lora_stage(2)
             if use_s1s2_vae:
                 print("[EricKrea2-MS]   Inter-stage VAE upscale (S1->S2, trained 2x) ...")
-                up2, s2_h, s2_w = upscale_between_stages(cur_lat, upscale_vae, pipe.vae, cur_h, cur_w, vsf)
+                up2, s2_h, s2_w = upscale_between_stages(cur_lat, upscale_vae, pipe.vae, cur_h, cur_w, vsf,
+                                                         degrid=_degrid_hops)
             else:
                 up2 = _upscale_latents(cur_lat, cur_h, cur_w, s2_h, s2_w, vsf)
             up2 = _renorm_hop(up2, cur_lat, upscale_renorm, "S1->S2")
@@ -1487,10 +1707,11 @@ class EricKrea2MultistageUltra:
                           f"{s3_w}x{s3_h}) ...")
                     up3, cur_h3, cur_w3 = upscale_between_stages(
                         cur_lat, upscale_vae, pipe.vae, cur_h, cur_w, vsf,
-                        target_h=s3_h, target_w=s3_w)
+                        target_h=s3_h, target_w=s3_w, degrid=_degrid_hops)
                 else:
                     print("[EricKrea2-MS]   Inter-stage VAE upscale (S2->S3, trained 2x) ...")
-                    up3, cur_h3, cur_w3 = upscale_between_stages(cur_lat, upscale_vae, pipe.vae, cur_h, cur_w, vsf)
+                    up3, cur_h3, cur_w3 = upscale_between_stages(cur_lat, upscale_vae, pipe.vae, cur_h, cur_w, vsf,
+                                                                 degrid=_degrid_hops)
             else:
                 cur_h3, cur_w3 = s3_h, s3_w
                 up3 = _upscale_latents(cur_lat, cur_h, cur_w, cur_h3, cur_w3, vsf)
@@ -1510,6 +1731,13 @@ class EricKrea2MultistageUltra:
                                                     downsample_override=(True if final_downsample else None))
         else:
             image = standard_decode(pipe, cur_lat, cur_h, cur_w, decode_vae=decode_vae)
+        if _degrid_final:
+            from .._degrid import degrid_image, format_stats
+            try:
+                image, _dg_stats = degrid_image(image)
+                print(format_stats(_dg_stats, "final image"))
+            except Exception as _e:  # cleanup pass must never kill a finished generation
+                print(f"[EricKrea2-DeGrid] final pass skipped ({type(_e).__name__}: {_e})")
 
         final_latent = _latent_dict(cur_lat, cur_h, cur_w)
         s1_latent = stage_latents[1] or final_latent

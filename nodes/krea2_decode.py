@@ -19,6 +19,8 @@ or Multi-Stage node and turn it into an image.
 
 from __future__ import annotations
 
+import torch
+
 from .._upscale_vae import decode_latents_with_upscale_vae
 from .._latent_utils import standard_decode
 from .. import _settings
@@ -232,6 +234,12 @@ class EricKrea2Decode:
                 "krea2_pipeline": ("KREA2_PIPELINE",),
                 "latent": ("KREA2_LATENT",),
                 "upscale_vae": ("UPSCALE_VAE",),
+            },
+            "optional": {
+                # Appended 2026-10-07 (new widget at the end - positionally safe).
+                "degrid": ("BOOLEAN", {"default": False,
+                    "tooltip": "Remove the VAE 2-pixel lattice from the decoded image "
+                               "(DeGrid notch; auto, untouched when no grid is detected)."}),
             }
         }
 
@@ -240,7 +248,7 @@ class EricKrea2Decode:
     FUNCTION = "decode"
     CATEGORY = "Eric/Krea2"
 
-    def decode(self, krea2_pipeline, latent, upscale_vae):
+    def decode(self, krea2_pipeline, latent, upscale_vae, degrid=False):
         pipe = krea2_pipeline["pipeline"]
         vsf = latent.get("vae_scale_factor", 8)
         image = decode_latents_with_upscale_vae(
@@ -248,7 +256,7 @@ class EricKrea2Decode:
             latent["height"], latent["width"], vae_scale_factor=vsf,
         )
         print(f"[EricKrea2] Upscale-decoded to {image.shape[1]}x{image.shape[2]} px")
-        return (image,)
+        return (_maybe_degrid(image, degrid),)
 
 
 class EricKrea2VAEDecode:
@@ -266,6 +274,10 @@ class EricKrea2VAEDecode:
                     "tooltip": "Optional base Wan 2.1 (or other Wan-family) VAE to decode "
                                "with instead of the pipeline's Qwen VAE - changes grain/"
                                "texture without an upscale."}),
+                # Appended 2026-10-07 (new widget at the end - positionally safe).
+                "degrid": ("BOOLEAN", {"default": False,
+                    "tooltip": "Remove the VAE 2-pixel lattice from the decoded image "
+                               "(DeGrid notch; auto, untouched when no grid is detected)."}),
             },
         }
 
@@ -274,13 +286,70 @@ class EricKrea2VAEDecode:
     FUNCTION = "decode"
     CATEGORY = "Eric/Krea2"
 
-    def decode(self, krea2_pipeline, latent, decode_vae=None):
+    def decode(self, krea2_pipeline, latent, decode_vae=None, degrid=False):
         pipe = krea2_pipeline["pipeline"]
         image = standard_decode(pipe, latent["packed"], latent["height"], latent["width"],
                                 decode_vae=decode_vae)
         tag = "alt VAE" if decode_vae is not None else "pipeline VAE"
         print(f"[EricKrea2] 1x decode ({tag}) -> {image.shape[2]}x{image.shape[1]} px")
-        return (image,)
+        return (_maybe_degrid(image, degrid),)
+
+
+def _maybe_degrid(image, enabled, tag="decode"):
+    if not enabled:
+        return image
+    from .._degrid import degrid_image, format_stats
+    try:
+        out, stats = degrid_image(image)
+        print(format_stats(stats, tag))
+        return out
+    except Exception as e:  # a cleanup pass must never fail the decode
+        print(f"[EricKrea2-DeGrid] skipped ({type(e).__name__}: {e})")
+        return image
+
+
+class EricKrea2DeGrid:
+    """Standalone VAE 2-pixel lattice remover for ANY image (A/B tool). Put it
+    straight after a decode, BEFORE sharpening / resizing / restorers - those
+    amplify or alias the lattice. Filter core: lunaaispace-eng/ComfyUI-DeGrid
+    (Apache-2.0), see _degrid.py."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"image": ("IMAGE",)},
+            "optional": {
+                "enabled": ("BOOLEAN", {"default": True,
+                    "tooltip": "OFF = pass through untouched (quick A/B)."}),
+                "mode": (["auto", "manual"], {"default": "auto",
+                    "tooltip": "auto: per-image calibrated clamp limit. manual: use 'limit'."}),
+                "limit": ("FLOAT", {"default": 0.02, "min": 0.001, "max": 0.2, "step": 0.001,
+                    "tooltip": "manual mode: max correction per pixel (0..1 units); larger = "
+                               "stronger, but more real fine texture removed."}),
+                "skip_when_clean": ("BOOLEAN", {"default": True,
+                    "tooltip": "Leave an image untouched when no phase-locked lattice is "
+                               "detected (otherwise ~1/255 of real fine texture is shaved)."}),
+                "grid_gain": ("FLOAT", {"default": 10.0, "min": 1.0, "max": 100.0, "step": 1.0,
+                    "tooltip": "Amplification of the removed-grid preview output."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("image", "removed_grid", "report")
+    FUNCTION = "run"
+    CATEGORY = "Eric/Krea2"
+
+    def run(self, image, enabled=True, mode="auto", limit=0.02, skip_when_clean=True,
+            grid_gain=10.0):
+        if not enabled:
+            return (image, torch.full_like(image, 0.5), "DeGrid disabled - passed through")
+        from .._degrid import degrid_image, format_stats
+        out, stats = degrid_image(image, limit=("auto" if mode == "auto" else float(limit)),
+                                  skip_when_clean=bool(skip_when_clean))
+        removed = ((image.float() - out.float()) * float(grid_gain) + 0.5).clamp(0, 1)
+        report = format_stats(stats)
+        print(report)
+        return (out, removed.to(image.dtype), report)
 
 
 class EricKrea2LatentToComfy:
@@ -326,10 +395,12 @@ NODE_CLASS_MAPPINGS = {
     "EricKrea2Decode": EricKrea2Decode,
     "EricKrea2VAEDecode": EricKrea2VAEDecode,
     "EricKrea2LatentToComfy": EricKrea2LatentToComfy,
+    "EricKrea2DeGrid": EricKrea2DeGrid,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "EricKrea2DecodeVAELoader": "Eric Krea2 Decode VAE Loader",
     "EricKrea2Decode": "Eric Krea2 Upscale Decode (2x)",
     "EricKrea2VAEDecode": "Eric Krea2 VAE Decode",
     "EricKrea2LatentToComfy": "Eric Krea2 Latent -> ComfyUI LATENT",
+    "EricKrea2DeGrid": "Eric Krea2 DeGrid (VAE grid remover)",
 }

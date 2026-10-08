@@ -71,14 +71,16 @@ class EricKrea2Loader:
                     "default": "bf16",
                     "tooltip": "Model precision (bf16 recommended for Blackwell)."
                 }),
-                "attention_backend": (["auto", "flash", "sage", "sdpa"], {
+                "attention_backend": (["auto", "flash", "sage", "sdpa", "sage_fp8"], {
                     "default": "auto",
                     "tooltip": (
                         "Attention kernel for the transformer.\n"
                         "auto = flash if available else SDPA (lossless, ~3x faster on Blackwell);\n"
                         "flash = FlashAttention varlen (lossless); sage = SageAttention (fastest,\n"
                         "slight quality trade-off); sdpa = PyTorch default. Falls back to SDPA if\n"
-                        "a kernel is unavailable."
+                        "a kernel is unavailable.\n"
+                        "sage_fp8 = SageAttention 2 int8-QK / fp8-PV dense kernel (~1.7x faster\n"
+                        "attention than flash on Blackwell; falls back to sage, then flash)."
                     )
                 }),
                 "device": (["cuda", "cuda:0", "cuda:1", "cpu"], {"default": "cuda"}),

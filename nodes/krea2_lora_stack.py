@@ -29,6 +29,7 @@ equal for a uniform weight, or shape them per stage (e.g. detail LoRA
 Author: Eric Hiss (GitHub: EricRollei)
 """
 
+from .._pipe_handles import derive_handle
 import os
 
 from .._lora_utils import get_lora_list, get_lora_full_path
@@ -111,11 +112,16 @@ class EricKrea2MultiLoRA:
             "tooltip": "Optional prompt passthrough. Connect your prompt here and take the "
                        "'prompt' output onward; with add_triggers on, the enabled slots' "
                        "trigger words are merged in."})
+        # Appended 2026-10-02 (a socket: no widgets_values slot, saved workflows untouched).
+        optional["suggestions"] = ("LORA_SUGGESTIONS", {
+            "tooltip": "Optional: LoRAs picked by the LoRA Suggester (video_prompter). They are added after "
+                       "this panel's own slots with their per-stage weights; a file already in the stack is "
+                       "not added twice. Their trigger words join the trigger merge."})
         return {"required": {"pipeline": ("KREA2_PIPELINE",)}, "optional": optional}
 
     def apply(self, pipeline, ephemeral=True, lora_preset="custom",
               stack_enabled=True, fetch_triggers=True, add_triggers="off",
-              force_refetch=False, prompt="", **kwargs):
+              force_refetch=False, prompt="", suggestions=None, **kwargs):
         if not stack_enabled:
             print("[EricKrea2-LoRA] Multi-LoRA stack is toggled OFF - passing pipeline through.")
             return (pipeline, _stack_settings(pipeline.get("lora_stack", [])),
@@ -133,7 +139,7 @@ class EricKrea2MultiLoRA:
 
         # Copy the pipeline dict + stack list so chaining accumulates immutably and
         # ComfyUI sees a distinct output (the underlying pipe object stays shared).
-        new_pipeline = dict(pipeline)
+        new_pipeline = derive_handle(pipeline)
         stack = list(pipeline.get("lora_stack", []))
         existing = {e["adapter_name"] for e in stack}
 
@@ -191,6 +197,43 @@ class EricKrea2MultiLoRA:
                 except Exception as e:
                     print(f"[EricKrea2-LoRA] trigger lookup failed for slot {i} "
                           f"(non-fatal): {e}")
+
+        # LoRAs from the LoRA Suggester (video_prompter), after the panel's own slots.
+        stacked_paths = {os.path.normcase(e.get("path", "")) for e in stack}
+        for entry in suggestions or []:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if not path or not os.path.isfile(path):
+                print(f"[EricKrea2-LoRA] suggestion skipped, file not found: {path}")
+                continue
+            if os.path.normcase(path) in stacked_paths:
+                continue
+            stacked_paths.add(os.path.normcase(path))
+            adapter_name = _sanitize_adapter_name(path)
+            if adapter_name in existing:
+                n = 2
+                while f"{adapter_name}_{n}" in existing:
+                    n += 1
+                adapter_name = f"{adapter_name}_{n}"
+            existing.add(adapter_name)
+            s1 = float(entry.get("weight_s1", 1.0))
+            stack.append({
+                "path": path,
+                "filename": os.path.basename(path),
+                "lora_name": entry.get("lora_name") or os.path.basename(path),
+                "adapter_name": adapter_name,
+                "strength": s1,
+                "weight_s1": s1,
+                "weight_s2": float(entry.get("weight_s2", s1)),
+                "weight_s3": float(entry.get("weight_s3", s1)),
+                "ephemeral": bool(ephemeral),
+            })
+            added += 1
+            for t in entry.get("triggers") or []:
+                if t and t.lower() not in _seen_trig:
+                    _seen_trig.add(t.lower())
+                    triggers.append(t)
+            print(f"[EricKrea2-LoRA] + suggested {entry.get('role', '')}: {entry.get('name', os.path.basename(path))} "
+                  f"S1 {s1} / S2 {entry.get('weight_s2')} / S3 {entry.get('weight_s3')}")
 
         new_pipeline["lora_stack"] = stack
         out_prompt = merge_triggers_into_prompt(prompt, triggers, add_triggers)

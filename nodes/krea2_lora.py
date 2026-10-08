@@ -27,6 +27,7 @@ Author: Eric Hiss (GitHub: EricRollei)
 
 import os
 import re
+from .._pipe_handles import derive_handle
 from typing import Tuple
 
 from .. import _settings
@@ -188,7 +189,7 @@ class EricKrea2ApplyLoRA:
 
         # Copy the pipeline dict + stack list so chaining accumulates immutably and
         # ComfyUI sees a distinct output (the underlying pipe object stays shared).
-        new_pipeline = dict(pipeline)
+        new_pipeline = derive_handle(pipeline)
         stack = list(pipeline.get("lora_stack", []))
 
         adapter_name = _sanitize_adapter_name(lora_path)
@@ -250,7 +251,7 @@ class EricKrea2UnloadLoRA:
     def unload(self, pipeline):
         pipe = pipeline["pipeline"]
         unload_all_loras(pipe)
-        new_pipeline = dict(pipeline)
+        new_pipeline = derive_handle(pipeline)
         new_pipeline["lora_stack"] = []
         return (new_pipeline,)
 

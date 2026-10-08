@@ -16,6 +16,12 @@ GGUF here is Path A (dequantize-on-load): weights are dequantized to the compute
 dtype and loaded full-precision into the diffusers module (no VRAM savings, but
 loads any GGUF-only finetune). See _gguf_utils for the transformer remap.
 
+ComfyUI-quantized single files are likewise dequantized on load (on the GPU):
+fp8 (bare / scaled), INT8 + ConvRot (in-house path), and - via comfy_kitchen's
+own layout dequantize, mirroring comfy/ops.py - MXFP8, NVFP4, ConvRot-W4A4,
+W4A8 and W6A8 (Oct 2026). docs/tools/krea2_checkpoint_inspector.py reports any
+file's format and whether it loads, without loading it.
+
 Requires a diffusers build with Krea2Pipeline. Text-encoder class is
 transformers.Qwen3VLModel (per the base model_index.json).
 
@@ -25,6 +31,7 @@ Author: Eric Hiss (GitHub: EricRollei)
 import json
 import os
 import time
+from collections import Counter
 import torch
 import gc
 import builtins
@@ -135,6 +142,19 @@ def _apply_vae_tiling_prefs(pipe_or_dict, mode, tile_px):
         pass
 
 
+def _release_derived_for(cache, log=None):
+    try:
+        from .._pipe_handles import release_derived
+        old = [cache.get("pipeline")]
+        h0 = getattr(builtins, "_ERIC_KREA2_LAST_HANDLE", None)
+        d0 = h0() if h0 is not None else None
+        if isinstance(d0, dict):
+            old.append(d0.get("pipeline"))
+        release_derived(old, log=log)
+    except Exception:
+        pass
+
+
 def _free_current(cache, log=None):
     """Drop the cached pipeline reference and empty the CUDA cache. We deliberately do
     NOT move it to CPU: that balloons system RAM and, under memory pressure, was crashing
@@ -143,6 +163,12 @@ def _free_current(cache, log=None):
     # Release a prior keep_in_vram=False output that is still pinned only by
     # ComfyUI's node-output cache (we kept just a weakref to it), so a rebuild
     # doesn't briefly hold two model copies in VRAM.
+    # Also release pipeline copies returned by LoRA nodes (plain dict copies that
+    # ComfyUI's output cache pins) - see _pipe_handles.py (2026-10-08). Done in a
+    # helper so no local list keeps the old pipeline alive through the gc.collect()
+    # below (the pipeline has reference cycles - a survivor there is only freed by a
+    # LATER collection, i.e. after the next model is already loading -> OOM).
+    _release_derived_for(cache, log)
     _h = getattr(builtins, "_ERIC_KREA2_LAST_HANDLE", None)
     if _h is not None:
         try:
@@ -157,16 +183,54 @@ def _free_current(cache, log=None):
     p = cache.get("pipeline")
     cache["pipeline"] = None
     cache["cache_key"] = None
+    _wr = None
     if p is not None:
+        try:
+            _wr = weakref.ref(p)
+        except TypeError:
+            _wr = None
         del p
         if log:
             log("released previous pipeline reference")
     gc.collect()
+    if _wr is not None and _wr() is not None and log:
+        _diag_survivor(_wr(), log)
     try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
         pass
+
+
+def _diag_survivor(obj, log):
+    """The outgoing pipeline is still alive after release + gc: log who references it
+    (two levels) so a VRAM pin can be fixed at its source (2026-10-08)."""
+    import inspect
+    try:
+        log("WARNING: previous pipeline still referenced after release - it stays in VRAM. "
+            "Referrers:")
+        me = inspect.currentframe()
+        for r in gc.get_referrers(obj):
+            if inspect.isframe(r) or r is me:
+                continue
+            desc = type(r).__name__
+            if isinstance(r, dict):
+                desc += " keys=" + str([k for k, v in r.items() if v is obj][:5])
+            elif hasattr(r, "__qualname__"):
+                desc += " " + str(getattr(r, "__qualname__", ""))
+            up = []
+            for r2 in gc.get_referrers(r)[:6]:
+                if inspect.isframe(r2):
+                    continue
+                d2 = type(r2).__name__
+                if isinstance(r2, dict):
+                    d2 += str([k for k, v in r2.items() if v is r][:3])
+                elif hasattr(r2, "__qualname__"):
+                    d2 += " " + str(r2.__qualname__)
+                up.append(d2)
+            log(f"  <- {desc}   <- {up}")
+    except Exception as e:
+        log(f"  (referrer scan failed: {e})")
 
 
 def _read_is_distilled(base_path):
@@ -302,8 +366,140 @@ def _conf_convrot(conf):
     return cr, gs
 
 
-def _dequant_comfy_quant(sd, dtype, log=None, device=None, quant_confs=None):
+def _src_quant_summary(qconfs, raw_sd):
+    """Dominant quant format of a single-file transformer (for native 'keep'):
+    {"format": str|None, "convrot": bool, "convrot_groupsize": int}. Uses the per-layer
+    confs when present, else sniffs a block weight's dtype + companion _scale."""
+    from collections import Counter as _C
+    fmts, rot, gs = _C(), 0, 256
+    for c in (qconfs or {}).values():
+        if isinstance(c, dict) and c.get("format"):
+            fmts[str(c.get("format"))] += 1
+        r, g = _conf_convrot(c)
+        if r:
+            rot += 1
+            gs = g
+    if fmts:
+        f = fmts.most_common(1)[0][0]
+        return {"format": f, "convrot": rot > 0, "convrot_groupsize": gs}
+    for k, v in (raw_sd or {}).items():
+        if k.endswith(".weight") and (k + "_scale") in raw_sd and getattr(v, "ndim", 0) == 2:
+            if v.dtype == torch.int8:
+                return {"format": "int8_tensorwise", "convrot": rot > 0, "convrot_groupsize": gs}
+            if "float8" in str(v.dtype):
+                return {"format": "float8_e4m3fn", "convrot": False, "convrot_groupsize": gs}
+    return {"format": None, "convrot": False, "convrot_groupsize": gs}
+
+
+# -- comfy_kitchen block / packed formats (MXFP8, NVFP4, W4A4, W4A8, W6A8) -----
+#
+# These formats CANNOT be dequantized with a plain `w * scale`: MXFP8 / NVFP4
+# block scales are stored in the cuBLAS SWIZZLED tile layout, and the 4/6-bit
+# formats are bit-packed. We therefore never hand-roll the math - we build the
+# layout Params EXACTLY as comfy/ops.py (mixed-precision _load_from_state_dict,
+# ComfyUI ~0.28 / Oct 2026) does and call the layout class's own dequantize().
+# That keeps us in lockstep with whatever comfy_kitchen version is installed.
+# Plain fp8-scaled / INT8 (+ConvRot) keep the proven in-house path below.
+
+_KITCHEN_FORMATS = ("mxfp8", "nvfp4", "convrot_w4a4", "asym_w4a8_int8", "w6a8_int8")
+_GROUPED_INT8_BITS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+_QUANT_AUX_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale",
+                       ".pre_quant_scale", ".comfy_quant", ".weight_s_rel",
+                       ".weight_s_channel", ".weight_codebook")
+
+
+def _kitchen_orig_shape(fmt, qshape, hint=None):
+    """Logical (out, in) of a kitchen-format weight. Prefer the shape the target
+    module expects (`hint`, from the meta skeleton); otherwise derive it from
+    the storage shape (exact for Krea2, whose dims are all multiples of 64, so
+    no MX/NV padding is ever present)."""
+    if hint is not None and len(hint) == 2:
+        return (int(hint[0]), int(hint[1]))
+    rows, cols = int(qshape[0]), int(qshape[1])
+    if fmt in ("nvfp4", "convrot_w4a4", "asym_w4a8_int8"):
+        cols *= 2                      # two 4-bit codes per byte
+    elif fmt == "w6a8_int8":
+        cols = cols * 4 // 3           # four 6-bit codes per 3 bytes
+    return (rows, cols)
+
+
+def _kitchen_dequant_weight(k, sd, conf, dtype, dev, orig_shape):
+    """Dequantize one kitchen-format weight `k` on `dev` -> fp tensor `orig_shape`.
+    Mirrors comfy/ops.py per-format scale handling (incl. the fp8/e8m0 dtype
+    VIEWS that make legacy uint8-on-disk scales and native fp8 both work)."""
+    try:
+        import comfy.quant_ops as cq
+    except Exception as e:
+        raise RuntimeError(
+            f"'{conf.get('format')}' weights need ComfyUI's comfy.quant_ops + comfy_kitchen "
+            f"(import failed: {e})")
+    fmt = conf.get("format")
+    if fmt not in cq.QUANT_ALGOS:
+        raise RuntimeError(
+            f"quant format '{fmt}' ({k}) is not supported by the installed comfy_kitchen - "
+            f"update ComfyUI / comfy_kitchen (known: {sorted(cq.QUANT_ALGOS)})")
+    qconf = cq.QUANT_ALGOS[fmt]
+    layout_cls = cq.get_layout_class(qconf["comfy_tensor_layout"])
+    if layout_cls is None:
+        raise RuntimeError(f"comfy_kitchen layout {qconf['comfy_tensor_layout']} unavailable")
+    prefix = k[:-len("weight")]          # 'blocks.0.attn.wq.'
+    params_conf = conf.get("params") if isinstance(conf.get("params"), dict) else {}
+
+    def scale(name, view_dtype=None):
+        v = sd.get(prefix + name)
+        if v is None:
+            return None
+        v = v.to(dev)
+        return v.view(view_dtype) if view_dtype is not None else v
+
+    if fmt == "mxfp8":
+        bs = scale("weight_scale", torch.float8_e8m0fnu)
+        if bs is None:
+            raise RuntimeError(f"missing MXFP8 block scales for {k}")
+        scales = {"scale": bs}
+    elif fmt == "nvfp4":
+        ts, bs = scale("weight_scale_2"), scale("weight_scale", torch.float8_e4m3fn)
+        if ts is None or bs is None:
+            raise RuntimeError(f"missing NVFP4 scales for {k}")
+        scales = {"scale": ts, "block_scale": bs}
+    elif fmt == "convrot_w4a4":
+        s = scale("weight_scale")
+        if s is None:
+            raise RuntimeError(f"missing ConvRot W4A4 scale for {k}")
+        scales = {"scale": s,
+                  "convrot_groupsize": int(conf.get("convrot_groupsize",
+                                                    params_conf.get("convrot_groupsize", 256))),
+                  "quant_group_size": 64,
+                  "linear_dtype": conf.get("linear_dtype", params_conf.get("linear_dtype", "int4"))}
+    else:  # grouped int8 family
+        s = scale("weight_s_rel")
+        if s is None:
+            raise RuntimeError(f"missing {fmt} group scale (weight_s_rel) for {k}")
+        if s.dtype == torch.uint8:
+            s = s.view(torch.float8_e4m3fn)
+        scales = {"scale": s,
+                  "s_channel": scale("weight_s_channel"),
+                  "codebook": scale("weight_codebook"),
+                  "group_size": int(conf.get("group_size", params_conf.get("group_size", 16))),
+                  "convrot_groupsize": int(conf.get("convrot_groupsize",
+                                                    params_conf.get("convrot_groupsize", 256)))}
+
+    params = layout_cls.Params(**scales, orig_dtype=dtype, orig_shape=tuple(orig_shape))
+    qdata = sd[k].to(device=dev, dtype=qconf["storage_t"])
+    w = layout_cls.dequantize(qdata, params)
+    if tuple(w.shape) != tuple(orig_shape):   # strip MX/NV alignment padding
+        w = w[: orig_shape[0], : orig_shape[1]]
+    return w.to(dtype)
+
+
+def _dequant_comfy_quant(sd, dtype, log=None, device=None, quant_confs=None,
+                         shape_hints=None):
     """Dequantize ComfyUI-quantized tensors to `dtype`:
+
+      * MXFP8 / NVFP4 / ConvRot-W4A4 / W4A8 / W6A8 (per comfy_quant conf):
+        comfy_kitchen layout dequantize (_kitchen_dequant_weight); optional
+        `shape_hints` {prefix-stripped weight key: (out, in)} supply the true
+        logical shape (else derived from storage).
 
       * scaled fp8 / INT8:  X.weight [F8_E4M3 | I8] * X.weight_scale
         ([] tensorwise scalar or [out, 1] row-wise) -> dtype
@@ -336,9 +532,29 @@ def _dequant_comfy_quant(sd, dtype, log=None, device=None, quant_confs=None):
     n = 0
     n_rot = 0
     n_cast = 0
+    shape_hints = shape_hints or {}
+    n_kit = Counter()
     for k, v in sd.items():
-        if k.endswith((".weight_scale", ".comfy_quant")):
+        if k.endswith(_QUANT_AUX_SUFFIXES):
             continue
+        if k.endswith(".weight"):
+            sk = _strip_quant_prefix(k)
+            conf = quant_confs.get(sk[:-len(".weight")])
+            kfmt = conf.get("format") if isinstance(conf, dict) else None
+            if kfmt in _KITCHEN_FORMATS:
+                oshape = _kitchen_orig_shape(kfmt, v.shape, shape_hints.get(sk))
+                if use_gpu:
+                    try:
+                        out[k] = _kitchen_dequant_weight(k, sd, conf, dtype, dev, oshape).cpu()
+                    except Exception as e:
+                        if log:
+                            log(f"GPU {kfmt} dequant failed ({e}); retrying on CPU for {k}")
+                        out[k] = _kitchen_dequant_weight(k, sd, conf, dtype, "cpu", oshape)
+                else:
+                    out[k] = _kitchen_dequant_weight(k, sd, conf, dtype, "cpu", oshape)
+                n += 1
+                n_kit[kfmt] += 1
+                continue
         skey = k + "_scale"
         if k.endswith(".weight") and skey in sd:
             convrot, gs = _conf_convrot(quant_confs.get(_strip_quant_prefix(k[:-len(".weight")])))
@@ -393,7 +609,9 @@ def _dequant_comfy_quant(sd, dtype, log=None, device=None, quant_confs=None):
         except Exception:
             pass
     if log and (n or n_cast):
-        log(f"comfy quant: dequantized {n} scaled ({n_rot} ConvRot-unrotated) + "
+        kit = (" [kitchen: " + ", ".join(f"{f} x{c}" for f, c in n_kit.items()) + "]"
+               if n_kit else "")
+        log(f"comfy quant: dequantized {n} scaled ({n_rot} ConvRot-unrotated){kit} + "
             f"cast {n_cast} plain weights on {'GPU' if use_gpu else 'CPU'}")
     return out, n
 
@@ -458,6 +676,26 @@ def _load_qwen3vl_single_file(path, dtype, log, device=None):
     log(f"text encoder single-file: dequantized {n_deq} quantized weights, "
         f"stripped 'model.' prefix -> {len(out)} tensors")
     return out
+
+
+def _transformer_shape_hints(model, raw_sd, n_layers):
+    """{prefix-stripped checkpoint weight key: (out, in)} from the (meta) diffusers
+    skeleton, for both comfy/original names (via the Krea2 remap table) and
+    diffusers names - the exact logical shapes packed quant formats need.
+    Never raises; an empty dict just means 'derive from storage'."""
+    try:
+        from .._gguf_utils import _build_krea2_map, _count_blocks, _strip_prefix
+        pshapes = {n: tuple(p.shape) for n, p in model.named_parameters()}
+        clean = [_strip_prefix(k) for k in raw_sd.keys()]
+        kmap = _build_krea2_map(n_layers,
+                                _count_blocks(clean, "txtfusion.layerwise_blocks.") or 2,
+                                _count_blocks(clean, "txtfusion.refiner_blocks.") or 2)
+        hints = {c: pshapes[d] for c, d in kmap.items()
+                 if d in pshapes and len(pshapes[d]) == 2}
+        hints.update({d: s for d, s in pshapes.items() if len(s) == 2})
+        return hints
+    except Exception:
+        return {}
 
 
 def _detect_format(path):
@@ -525,8 +763,10 @@ class EricKrea2ComponentLoader:
                 "precision": (["bf16", "fp16", "fp32"], {"default": "bf16",
                     "tooltip": "Compute dtype (bf16 recommended for Blackwell). GGUF is dequantized "
                                "to this dtype."}),
-                "attention_backend": (["auto", "flash", "sage", "sdpa"], {"default": "auto",
-                    "tooltip": "Transformer attention kernel. auto = flash if available else SDPA."}),
+                "attention_backend": (["auto", "flash", "sage", "sdpa", "sage_fp8"], {"default": "auto",
+                    "tooltip": "Transformer attention kernel. auto = flash if available else SDPA. "
+                               "sage_fp8 = SageAttention 2 int8/fp8 dense kernel (~1.7x faster "
+                               "attention, small quality trade-off; falls back to sage / flash)."}),
                 "device": (["cuda", "cuda:0", "cuda:1", "cpu"], {"default": "cuda"}),
                 "keep_in_vram": ("BOOLEAN", {"default": True,
                     "tooltip": "Cache the assembled pipeline between runs."}),
@@ -543,6 +783,19 @@ class EricKrea2ComponentLoader:
                     "tooltip": "Custom tile size in PIXELS (0 = VAE default). Needs >=256 to "
                                "take effect; stride is 75% of tile. If the pattern pitch moves "
                                "when you move this, the pattern IS tile seams."}),
+                # Appended 2026-10-08 (positional widgets_values safety: END of the list).
+                "compute": (["bf16", "native"], {"default": "bf16",
+                    "tooltip": "bf16: dequantize everything to bf16 (best quality, as before). "
+                               "native: run the 28 transformer blocks' Linears on quantized "
+                               "kernels (comfy_kitchen, same path as ComfyUI core) - faster S1 "
+                               "and less VRAM. Native also quantizes ACTIVATIONS (fp8/fp4 formats), "
+                               "so expect some quality loss; your call. LoRAs still work. Needs "
+                               "precision bf16 and a Blackwell GPU for MXFP8/NVFP4."}),
+                "native_format": (["keep", "int8", "mxfp8", "nvfp4"], {"default": "keep",
+                    "tooltip": "compute=native only. keep: the checkpoint's own format (INT8 / "
+                               "INT8-ConvRot / MXFP8 / NVFP4 / fp8); bf16 or GGUF sources fall "
+                               "back to mxfp8. int8 / mxfp8 / nvfp4: quantize on load from any "
+                               "source (NVFP4 uses a dynamic activation scale)."}),
             }
         }
 
@@ -551,7 +804,7 @@ class EricKrea2ComponentLoader:
                    vae_path="", precision="bf16", attention_backend="auto",
                    device="cuda", keep_in_vram=True, offload_vae=False, loader_preset="custom",
                    transformer_pick="none", text_encoder_pick="none", vae_pick="none",
-                   vae_tiling="auto", vae_tile_px=0):
+                   vae_tiling="auto", vae_tile_px=0, compute="bf16", native_format="keep"):
         # Cheap, GPU-free check (no dequant/segfault risk - see §8 of the session
         # handoff for why an earlier unconditional IS_CHANGED=nan was removed).
         # If our cache is empty (fresh start, or EricKrea2UnloadModels just ran),
@@ -562,6 +815,27 @@ class EricKrea2ComponentLoader:
             import time
             return time.time()
         return _COMP_CACHE.get("cache_key")
+
+    @staticmethod
+    def _apply_native_compute(pipe, native_format, precision, device, log):
+        """compute=native (2026-10-08): quantize the joint blocks' Linears in place on the
+        GPU (see _native_quant.py). Never raises - on any problem the model stays bf16."""
+        if precision != "bf16":
+            log(f"native compute needs precision=bf16 (got {precision}) - staying {precision}")
+            return
+        if str(device) == "cpu" or not torch.cuda.is_available():
+            log("native compute needs a CUDA device - staying bf16")
+            return
+        try:
+            from .._native_quant import convert_transformer, resolve_format
+            src = getattr(pipe.transformer, "_eric_src_quant", None)
+            fmt, gs = resolve_format(native_format, src, log=log)
+            _t = time.perf_counter()
+            n = convert_transformer(pipe.transformer, fmt, gs, log=log)
+            log(f"  [timing] native quantize ({fmt}, {n} modules): {time.perf_counter() - _t:.1f}s"
+                + (f" | source {src.get('format')}" if src and src.get("format") else ""))
+        except Exception as e:
+            log(f"native compute failed ({type(e).__name__}: {e}) - staying bf16")
 
     # ── component override builders ──────────────────────────────────────
 
@@ -588,8 +862,11 @@ class EricKrea2ComponentLoader:
             log(f"  [timing] disk load: {time.perf_counter() - _t:.1f}s")
             _t = time.perf_counter()
             qconfs = _layer_quant_confs(raw_sd, path=path, log=log)
+            _srcq = _src_quant_summary(qconfs, raw_sd)
             raw, n_deq = _dequant_comfy_quant(raw_sd, dtype, log=log, device=device,
-                                              quant_confs=qconfs)
+                                              quant_confs=qconfs,
+                                              shape_hints=_transformer_shape_hints(
+                                                  m, raw_sd, n_layers))
             del raw_sd
             log(f"  [timing] dequant/cast: {time.perf_counter() - _t:.1f}s")
             _t = time.perf_counter()
@@ -605,6 +882,7 @@ class EricKrea2ComponentLoader:
                 log("  MISSING sample: " + ", ".join(list(missing)[:10]))
             if unexpected:
                 log("  UNEXPECTED sample: " + ", ".join(list(unexpected)[:10]))
+            m._eric_src_quant = _srcq
             return m
         if fmt == "dir":
             if os.path.isdir(os.path.join(path, "transformer")):
@@ -710,7 +988,7 @@ class EricKrea2ComponentLoader:
              vae_path="", precision="bf16", attention_backend="auto",
              device="cuda", keep_in_vram=True, offload_vae=False, loader_preset="custom",
              transformer_pick="none", text_encoder_pick="none", vae_pick="none",
-             vae_tiling="auto", vae_tile_px=0):
+             vae_tiling="auto", vae_tile_px=0, compute="bf16", native_format="keep"):
         # Headless / API-run fallback: apply a named preset to the params (the JS
         # normally writes these into the visible panel at edit time).
         if loader_preset and loader_preset != "custom":
@@ -773,11 +1051,14 @@ class EricKrea2ComponentLoader:
             "device": device,
             "keep_in_vram": keep_in_vram,
             "offload_vae": offload_vae,
+            "compute": compute,
+            "native_format": native_format,
         })
 
         cache_key = (f"{_norm_path(base_pipeline_path)}|{_norm_path(transformer_path)}|"
                      f"{_norm_path(text_encoder_path)}|{_norm_path(vae_path)}|"
-                     f"{precision}|{device}|{offload_vae}")
+                     f"{precision}|{device}|{offload_vae}"
+                     + (f"|native:{native_format}" if compute == "native" else ""))
         cache = _COMP_CACHE
         if keep_in_vram and cache["pipeline"] is not None and cache["cache_key"] == cache_key:
             log("using cached component pipeline")
@@ -796,6 +1077,11 @@ class EricKrea2ComponentLoader:
                                        transformer_path=transformer_path,
                                        loader_settings=loader_settings)
             builtins._ERIC_KREA2_LAST_HANDLE = weakref.ref(out)
+            try:
+                from .._pipe_handles import register_handle
+                register_handle(out)
+            except Exception:
+                pass
             return (out, loader_settings)
 
         # Building a new pipeline: free the previous one FIRST so we never hold two sets of
@@ -839,6 +1125,9 @@ class EricKrea2ComponentLoader:
                 log("moving VAE to CPU")
                 pipe.vae = pipe.vae.to("cpu")
 
+        if compute == "native":
+            self._apply_native_compute(pipe, native_format, precision, device, log)
+
         apply_attention_backend(pipe.transformer, attention_backend, log=log)
 
         try:
@@ -851,6 +1140,11 @@ class EricKrea2ComponentLoader:
                                       model_path=base_pipeline_path,
                                       transformer_path=transformer_path,
                                       loader_settings=loader_settings)
+        try:
+            from .._pipe_handles import register_handle
+            register_handle(result)
+        except Exception:
+            pass
 
         if keep_in_vram:
             # Persist for reuse across runs (see the cache-hit check at the top).

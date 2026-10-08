@@ -106,6 +106,28 @@
       "source": "ss_tag_frequency",
       "fetched_at": "2026-07-20",
       "sha256": "4ea9763650f34ea970169b87c6371c6dd05977c5c319f3a77eea732fda5061f5"
+    },
+    "l:\\models\\loras\\krea2\\ptotostyle\\2462105-ultra_real_-_krea2__klein9b\\3091374-krea2_v1\\3091374_ultra_real_krea2_v1.safetensors": {
+      "sig": "228588920|1783042914",
+      "trigger_words": [
+        "high-quality"
+      ],
+      "name": "UltraReal - Krea2, Klein9b - KR2_V1",
+      "source": "civitai_id",
+      "fetched_at": "2026-09-25",
+      "civitai_version_id": 3091374,
+      "civitai_model_id": 2462105
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\2976533-proto-deco\\3373614-v1_0\\3373614_proto-decò_v3.safetensors": {
+      "sig": "228587304|1790903978",
+      "trigger_words": [
+        "Proto-Deco Japonism"
+      ],
+      "name": "Proto-Deco - v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-05",
+      "civitai_version_id": 3373614,
+      "civitai_model_id": 2976533
     }
   }
 }

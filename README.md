@@ -3,7 +3,9 @@
 Self-contained ComfyUI custom nodes for **Krea 2** - Krea AI's open-weight,
 from-scratch image model (single-stream MMDiT, flow matching, Qwen3-VL
 conditioning). Includes text-to-image, progressive multi-stage high-res
-generation, a 2× upscale-decode trick, and natural-language prompt tooling.
+generation, a 2× upscale-decode trick, natural-language prompt tooling, and an
+image-to-image suite (control, style, inpaint/outpaint, instruction edits) plus
+negative guidance that works on Turbo.
 
 No dependency on any other node pack.
 
@@ -45,7 +47,58 @@ No dependency on any other node pack.
   downsample "quality-pass" VAE modes that are usually cleaner than the Wan 2.1 VAE
   at the same size.
 
+- **A full image-to-image suite on one node.** Control-LoRA ("ControlNet" depth/pose),
+  training-free style transfer, inpaint/outpaint with the AnyPaint adapter, and
+  instruction/identity editing with the Krea 2 Identity Edit LoRA - each a small builder
+  node that plugs into a socket on Multi-Stage Ultra, with per-stage strengths, so the
+  same multi-stage high-res engine serves every task.
+- **Negative prompts that work on Turbo.** NAG (Normalized Attention Guidance) and NegPiP
+  (`(phrase:-1)` in the prompt) give a distilled checkpoint real negatives at guidance 0 -
+  no second CFG pass.
+- **Native quantized compute.** Run INT8-ConvRot / MXFP8 / NVFP4 / fp8 checkpoints on
+  their own tensor-core kernels instead of dequantizing to bf16: ~1.45x faster and ~12 GB
+  less VRAM at 3 MP, LoRAs included. Opt-in; bf16 stays the default.
+- **Correctness first.** A same-seed A/B found and fixed a diffusers `flash_varlen` bug that
+  silently dropped the bottom rows of every Krea 2 image (the "bottom band"); model switches
+  no longer leave the previous model resident in VRAM.
+
 ## What's New
+
+**October 2026 - image-to-image suite, negative guidance, native quantized compute.**
+
+- **Control (ControlNet-LoRA)** - new **Eric Krea2 Control** node + Ultra `control` socket:
+  depth / pose / canny ... structure control via Krea 2 Control-LoRA checkpoints (expanded
+  input layer + block LoRA), per-stage strengths. See [Control](#control-controlnet-lora).
+- **Style Reference (training-free)** - new **Eric Krea2 Style Reference** node + Ultra
+  `style` socket: transfers palette / brushwork / texture from one image with no LoRA.
+  See [Style Reference](#style-reference-training-free).
+- **Inpaint / outpaint** - new **Eric Krea2 Paint** + **Paint Composite** nodes + Ultra
+  `paint` socket: AnyPaint / Outpaint adapters, kept regions pinned to the source at every
+  stage. See [Inpaint / outpaint](#inpaint--outpaint-paint).
+- **Edits** - new **Eric Krea2 Edit** node + Ultra `edit` socket: the Krea 2 Identity Edit
+  recipe (recolor, restyle, re-pose, add / replace objects, outpaint, person-into-scene),
+  with the v1.2 `fit` reference geometry and the `ref_boost` fidelity dial.
+  See [Edits](#edits-krea-2-identity-edit).
+- **Negative guidance** - new **Eric Krea2 Negative Guidance** node + Ultra `guidance`
+  socket: NAG and NegPiP, both off by default, combinable, work at guidance 0.
+  See [Negative guidance](#negative-guidance-nag--negpip).
+- **Native quantized compute** - Component Loader `compute` / `native_format` (appended):
+  run quantized checkpoints on their native kernels. See
+  [Native quantized compute](#native-quantized-compute).
+- **More checkpoint formats** - the Component Loader now loads MXFP8, NVFP4, ConvRot-W4A4,
+  W4A8 and W6A8 single files (ComfyUI `comfy_kitchen` layouts) next to fp8, INT8 and
+  INT8-ConvRot. See [Quantized checkpoints](#quantized-checkpoints-the-component-loader-reads).
+- **DeGrid** - removes the VAE's 2-pixel lattice: new **Eric Krea2 DeGrid** node, a
+  `degrid` toggle on both decode nodes, and `degrid` on Ultra (inter-stage VAE hops and/or
+  the final image). See [DeGrid](#degrid-vae-2-pixel-lattice).
+- **LoRA search** - click the middle of any LoRA dropdown (Multi-LoRA Stack, Apply LoRA,
+  Diagnose LoRA) for a search popup over filenames, folders, trigger words and LoRA
+  Catalog cards; Multi-LoRA Stack also gained a `suggestions` socket for the LoRA
+  Suggester. See [LoRA search](#lora-search--suggestions).
+- **Fixes** - the `flash_varlen` bottom-band bug (all Krea 2 attention is now mask-safe;
+  existing seeds render slightly differently, edge to edge correct); VRAM pinned by LoRA
+  nodes and by the loader on model switches; the Reference Latents `edit_frame` recipe used
+  a stretch instead of the trained fit geometry. See [Notes](#notes).
 
 **Late July 2026 (cont.) - field-calibrated scoring, preset UX, er_sde.**
 
@@ -154,8 +207,21 @@ diffusers/transformers build new enough to expose it.
 - Krea 2 weights in diffusers layout (e.g. `H:\Training\Krea-2-Raw` and
   `H:\Training\Krea-2-Turbo`).
 - *Optional, recommended on Blackwell:* FlashAttention and/or SageAttention for
-  the faster `attention_backend` paths.
+  the faster `attention_backend` paths. Kernel bench on an RTX PRO 5000 (sm120, Krea 2 shapes,
+  2026-10-08): flash-attn 2 = baseline; SageAttention 2 `sageattn` (int8 QK, fp8 PV) 1.6-1.8x
+  faster per attention call with ~4% relative error (cos 0.9992); its Triton varlen kernel
+  (what `attention_backend=sage` picks first) only 1.13-1.17x; xformers and cuDNN SDPA = flash.
+  The dense kernel is the **`sage_fp8`** choice (last in the list). End to end on Turbo, 8 steps:
+  **-4-6% step time at 1.5 MP, -9-12% at 3 MP, -19% at 8.4 MP** (10.2 -> 8.3 s/step). Images are
+  equally clean (text, skin, frost detail checked at 1:1) but not seed-identical to flash - the
+  small per-call error steers the trajectory, so the same seed gives a sibling image, sometimes a
+  different framing. Edit / NAG / ref_boost runs still use flash for their split attention.
 - *Optional:* the spacepxl Wan 2× upscale VAE (auto-downloaded on first use).
+- *Optional:* `flash-attn` (2.8+) - also used by the edit / NAG / ref_boost attention core
+  (falls back to an exact but slower math path without it).
+- *Optional:* ComfyUI's `comfy_kitchen` (ships with recent ComfyUI) - needed for MXFP8 / NVFP4 /
+  W4A4 / W4A8 / W6A8 checkpoints and for `compute = native`.
+- *Optional, per feature:* Control-LoRA, AnyPaint and Identity Edit LoRA weights (see each section).
 
 ## Example workflow
 
@@ -176,7 +242,7 @@ with group **bypass** (Ctrl+B) instead of juggling separate workflows. See
 |------|------|
 | **Eric Krea2 Loader** | Loads `Krea2Pipeline` (Raw or Turbo), applies `attention_backend`, caches in VRAM. Auto-detects `is_distilled`. Preset dropdown. |
 | **Eric Krea2 Generate** | Text-to-image. Emits `IMAGE` + a chainable `KREA2_LATENT`. `auto_settings` picks 8/0 for Turbo, 28/4.5 for Raw. |
-| **Eric Krea2 Multi-Stage Ultra (res)** | Up to 3-stage progressive high-res with the custom RES/DEIS samplers, per-stage schedules, img2img `init_latent`, an optional `ref_latents` edit input, and `width`/`height` overrides. Best on Raw. |
+| **Eric Krea2 Multi-Stage Ultra (res)** | Up to 3-stage progressive high-res with the custom RES/DEIS samplers, per-stage schedules, img2img `init_latent`, an optional `ref_latents` edit input, and `width`/`height` overrides. Sockets for [control, style, paint, edit and negative guidance](#image-to-image-control-style-paint--edit); `degrid` for the VAE lattice. Best on Raw for multi-stage re-denoise. |
 | **Eric Krea2 Multi-Stage Ultra V2 (presets)** | Preset-driven variant of the Ultra node - serialises every widget (incl. `sigmas`, `width`/`height`) into one reproducible recipe. |
 
 ![Loader group: Component Loader, Upscale/Decode VAE loaders, and the Multi-LoRA Stack](assets/Loader-group.png)
@@ -215,10 +281,45 @@ See [Parameter sweeps](#parameter-sweeps).
 | Node | Does |
 |------|------|
 | **Eric Krea2 VAE Encode** | Encodes an `IMAGE` → `KREA2_LATENT` (the img2img primitive). |
-| **Eric Krea2 Reference Latents (Edit)** | VAE-encodes 1-3 reference images → `KREA2_REF_LATENTS` for the Ultra (res) node's `ref_latents` input (ai-toolkit "index_timestep_zero" edit method). **Needs an edit-trained LoRA** to do anything; the base model ignores reference tokens. See [Reference Latents](#reference-latents-edit-lora-image-conditioning). |
+| **Eric Krea2 Reference Latents (Edit)** | VAE-encodes 1-3 reference images → `KREA2_REF_LATENTS` for the Ultra (res) node's `ref_latents` input (ai-toolkit "index_timestep_zero" edit method). **Needs an edit-trained LoRA** - without one the base model does not ignore the reference tokens, they corrupt the image into a blocky mosaic. See [Reference Latents](#reference-latents-edit-lora-image-conditioning). |
 | **Eric Krea2 Resolution** | Size from `aspect_ratio` + `megapixels` or a source image → `width`/`height`/`dims` + a blank `KREA2_LATENT` (noise or zeros). |
 | **Eric Krea2 Latent Resize** | Resize a `KREA2_LATENT` in latent space (bislerp, no VAE round-trip): `scale` / `dimensions` / `megapixels`. |
 | **Eric Krea2 Latent → ComfyUI LATENT** | Bridge a `KREA2_LATENT` to a stock ComfyUI `LATENT`. |
+
+### Image-to-image: control, style, paint & edit
+
+Each builds a bundle for one socket on **Multi-Stage Ultra** (all sockets were appended -
+saved workflows are untouched). Nothing loads or runs in these nodes; Ultra installs the
+runtime for one generation and removes it afterwards (cancel-safe).
+
+| Node | Ultra socket | Does |
+|------|--------------|------|
+| **Eric Krea2 Control (Depth/Pose ControlNet-LoRA)** | `control` | Control image + Control-LoRA checkpoint + per-stage strengths (S1 1.0 / S2 0.5 / S3 0). See [Control](#control-controlnet-lora). |
+| **Eric Krea2 Style Reference (training-free)** | `style` | Style image + `recommended` / `custom` preset + per-stage multipliers (S1 only by default). See [Style Reference](#style-reference-training-free). |
+| **Eric Krea2 Paint (inpaint / outpaint)** | `paint` | Source + mask and/or outpaint padding, adapter (`anypaint` / `outpaint` / `none`), per-stage restore + adapter switches. Outputs the bundle, a `vlm_image` for Vision Prompt, a canvas preview and the generated mask. See [Inpaint / outpaint](#inpaint--outpaint-paint). |
+| **Eric Krea2 Paint Composite** | - | Optional pixel-exact paste-back of the source outside the mask with a feathered edge. |
+| **Eric Krea2 Edit** | `edit` | Source image (+ optional second reference), edit instruction, `fit_mode`, `ref_boost` / `ref_boost_a` (+ mask), `grounding_px`, `size_from`, `ground_negative`. See [Edits](#edits-krea-2-identity-edit). |
+| **Eric Krea2 Negative Guidance** | `guidance` | NAG (own negative text, phi / tau / alpha, stages, sigma window) and NegPiP (mode, strength, block range, text-fusion option). See [Negative guidance](#negative-guidance-nag--negpip). |
+
+**Which sockets combine (one run):**
+
+| | control | style | paint | edit | guidance | ref_latents |
+|---|---|---|---|---|---|---|
+| **control** | - | yes | yes | yes | yes | yes* |
+| **style** | yes | - | no | no | skipped | no |
+| **paint** | yes | no | - | no | skipped | no |
+| **edit** | yes | no | no | - | yes | no |
+| **guidance** | yes | skipped | skipped | yes | - | skipped |
+| **ref_latents** | yes* | no | no | no | skipped | - |
+
+"no" raises a clear error (both wrap the transformer forward); "skipped" runs the other one
+and prints that guidance was ignored.
+
+Control with edit or ref_latents: the control hint is applied to the target image tokens only;
+reference tokens bypass the Control-LoRA (before 2026-10-08 control was silently dropped
+whenever reference tokens were present). \*control + ref_latents is verified to apply control
+on every step; a full visual run with the edit LoRA at 1.5 MP spilled VRAM on a 48 GB card
+shared with displays, so try 1 MP first.
 
 ### Decode
 
@@ -228,6 +329,7 @@ See [Parameter sweeps](#parameter-sweeps).
 | **Eric Krea2 Decode VAE Loader** | Loads a plain decode VAE. |
 | **Eric Krea2 Upscale Decode (2×)** | Decodes a `KREA2_LATENT` via the upscale VAE (no re-denoise). Resolution and any downsample/blur are whatever the loaded `UPSCALE_VAE` was configured with. |
 | **Eric Krea2 VAE Decode** | Plain 1× decode of a `KREA2_LATENT`. |
+| **Eric Krea2 DeGrid (VAE grid remover)** | Removes the VAE's 2-pixel lattice from any image (auto-calibrated notch, untouched when clean) + removed-grid preview and report. Both decode nodes also gained a `degrid` toggle. See [DeGrid](#degrid-vae-2-pixel-lattice). |
 
 ### Presets, LoRA & utilities
 
@@ -235,9 +337,9 @@ See [Parameter sweeps](#parameter-sweeps).
 |------|------|
 | **Eric Krea2 Merge Settings** | Merges section recipe strings into one `KREA2_SETTINGS` (dicts updated, `lora` lists concatenated). |
 | **Eric Krea2 Settings from Image** | Reads an image's embedded generation settings back into a `KREA2_SETTINGS` recipe. |
-| **Eric Krea2 Component Loader** | Loads pipeline components with a preset dropdown. |
+| **Eric Krea2 Component Loader** | Loads pipeline components (base folder + optional single-file transformer / VAE / text encoder) with a preset dropdown. Reads bf16, GGUF, fp8, INT8, INT8-ConvRot, MXFP8, NVFP4, ConvRot-W4A4, W4A8, W6A8 ([formats](#quantized-checkpoints-the-component-loader-reads)); `compute` = `bf16` or `native` quantized kernels ([native compute](#native-quantized-compute)); VAE tiling controls. |
 | **Eric Krea2 Apply LoRA** / **Unload LoRA** / **Diagnose LoRA** | Apply, cleanly remove, and inspect LoRA adapters on the cached pipeline. Apply LoRA supports **per-stage weights** (`per_stage_weights` + `weight_s1`/`weight_s2`/`weight_s3`) so a LoRA's strength can differ across S1/S2/S3 in a multi-stage run, plus a **preset dropdown** (`apply_lora_preset` + ★ Save). |
-| **Eric Krea2 Multi-LoRA Stack** | Stack several LoRAs in one growable node - each slot has **per-stage weights** (`strength_Ns1`/`s2`/`s3` for S1/S2/S3) and an on/off toggle, plus a shared `ephemeral` switch and a **preset dropdown** (`lora_preset` + ★ Save). Unused rows auto-hide until needed. |
+| **Eric Krea2 Multi-LoRA Stack** | Stack several LoRAs in one growable node - each slot has **per-stage weights** (`strength_Ns1`/`s2`/`s3` for S1/S2/S3) and an on/off toggle, plus a shared `ephemeral` switch and a **preset dropdown** (`lora_preset` + ★ Save). Unused rows auto-hide until needed. Click the middle of a LoRA dropdown for the 🔍 [search popup](#lora-search--suggestions) (also on Apply / Diagnose LoRA); optional `suggestions` socket for the LoRA Suggester. |
 | **Eric Krea2 Unload Models** | Free VRAM on demand. |
 | **Eric Krea2 Save Latent (debug)** | Save/inspect a packed latent for debugging. |
 
@@ -600,8 +702,9 @@ themselves.
 **Requires an edit-trained LoRA.** The base Krea2 model was never trained to read these
 tokens - this pathway only does something useful with an ai-toolkit `krea2` edit LoRA
 (`model_kwargs.edit: true`) loaded, e.g. the Civitai **Krea 2 Style Reference LoRA**.
-Without one, the reference tokens are appended but effectively ignored (and you just pay
-their compute cost - ~2048 tokens per 1 MP ref, per denoise step).
+Without one, the reference tokens are **not** ignored: the base model reads them as image
+content and the output breaks up into a blocky mosaic (tested 2026-10-08, with and without
+control). Cost is ~2048 extra tokens per 1 MP ref, per denoise step.
 
 **Recommended wiring** (matches the Style Reference LoRA's training setup):
 - the reference image(s) → **Reference Latents** (`max_ref_megapixels` 1.0) → `ref_latents`;
@@ -614,6 +717,269 @@ one, so with guidance enabled the references condition *both* passes and partial
 in the CFG delta. Keep it on Turbo at `g = 0` (which is what the published edit LoRAs
 target anyway). This is an independent diffusers-side reimplementation of the published
 mechanism (mechanism credit: ostris / ai-toolkit), not a port.
+
+**Two recipes (`edit_recipe` on the Reference Latents node).** `ostris_t0` (above) is for
+style / reference LoRAs. `edit_frame` is the identity / instruction edit method - sources
+prepended on the target grid at frame 1..N, shared timestep - placed with the krea2edit v1.2
+`fit` geometry (Oct 2026; it previously stretched mismatched aspect ratios) and active on the
+stage whose grid it was encoded for. For the Krea 2 Identity Edit LoRA use the dedicated
+[Edit node](#edits-krea-2-identity-edit) instead - it adds the grounded instruction encode,
+ref_boost and the trained negative.
+
+## Control (ControlNet-LoRA)
+
+```
+Load Image -> (depth / pose / canny preprocessor) -> Eric Krea2 Control -> (control) Multi-Stage Ultra
+```
+
+Krea 2 "ControlNet" checkpoints are Control-LoRAs: the DiT input projection is expanded
+from 64 to 128 channels (`[noisy patches ; control patches]`, trained weights in the
+checkpoint) plus a rank-64 LoRA on every block. The control image is VAE-encoded and enters
+**clean at every step**. Everything is forward hooks for one generation - nothing is merged
+into the weights, so it composes with the LoRA stack and never leaks.
+
+- **Checkpoint** - public: `Patil/Krea-2-depth-controlnet` (trained on Raw, works on Raw
+  and Turbo, ~1 MP buckets). Put it in your Krea2 LoRA folder; files with `control` in the
+  path are listed first. The checkpoint decides the control *type* - a depth LoRA needs a
+  depth map.
+- **Depth maps** - `channel_mode` grayscale, `normalize` per_image_minmax, near = **white**
+  (`invert` if your preprocessor gives near = dark). Pose / canny / lineart: `rgb`, `none`.
+- **Per-stage strength** - scales the block LoRA (the reference's `--lora-scale`); the
+  expanded input layer is always full. `0` = that stage runs the stock model. Defaults
+  S1 1.0 / S2 0.5 / S3 0 - structure is set in S1, S3 runs far above the trained size.
+- The control image is cover-cropped and re-encoded at **each controlled stage's own
+  resolution** - keep it at the generation's aspect ratio.
+
+## Style Reference (training-free)
+
+```
+Load Image (style) -> Eric Krea2 Style Reference -> (style) Multi-Stage Ultra
+```
+
+Transfers a reference's palette, brushwork, texture and rendering language without a LoRA
+(port of nkxx188/ComfyUI-Krea2-StyleTransfer). Every styled step runs the model on
+`[target, reference]`: the reference is noised to the target's level along a model-guided
+trajectory, and in blocks 7-27 the target attends to the reference's keys/values with
+frequency-band reweighting - early it may align to the reference layout, late it can no
+longer copy positions (no content leakage) but still pulls style statistics.
+
+- **`preset`** - `recommended` locks the original author's low-leakage tuning (custom
+  widgets ignored); `custom` exposes them (`ref_k_strength`, `low_scale_end`,
+  `high_scale_start/end`, `adain_strength`, `ref_value_mix`, `value_adain_strength`,
+  `beta`, `blocks`, `trajectory`, `gamma`).
+- **`style_strength`** - overall amount; ~1.0 is strong and coherent at 3 MP; 2.0 can
+  overshoot. **`s1/s2/s3_strength`** multiply it per stage; S2/S3 default 0 (S2 refines S1's
+  styled result at full speed).
+- **`trajectory`** - `model_pc` (original, ~2 x `trajectory_steps` extra evaluations per
+  styled stage) or `linear` (free, weaker).
+- **Cost** - ~2.3-2.6x per styled step plus the trajectory pass; a 3 MP S1 run on a 48 GB
+  card takes ~2 min. On cards under 64 GB with guidance off, the prompt is encoded once and
+  the text encoder parks on the CPU for the run so the doubled batch fits.
+
+## Inpaint / outpaint (Paint)
+
+```
+Load Image (+ mask) -> Eric Krea2 Paint -> (paint) Multi-Stage Ultra -> [Paint Composite]
+                         \-> vlm_image -> Eric Krea2 Vision Prompt (image1, picture_n) -> prompt_conditioning
+```
+
+Implements the yijunwang2 **AnyPaint** / **Outpaint** functional adapters on our model:
+
+- a small **condition image** (the canvas with every to-be-generated pixel filled with the
+  median known colour, <= 384 px) is registered onto the target grid by fractional RoPE
+  coordinates, its keys/values computed once at t = 0 (isolated kv_cache);
+- **kept regions are pinned to the source** in velocity space - every sampler (euler, RES,
+  DEIS, hybrids, CFG) lands exactly on the source there;
+- Stage 1 Euler runs on our fp32 solver when paint is active (bit-level parity with the
+  author's pipeline; the stock pipe's bf16 loop drifted).
+
+Settings:
+
+- **`adapter`** - `anypaint` (arbitrary masks, inpaint + outpaint, one pass; put
+  `krea2_anypaint_rank32` on the LoRA stack, S1 = 1, S2/S3 = 0), `outpaint` (older,
+  rectangular only), `none` (training-free: only pins the kept region - fine for small
+  inpaints). Krea 2 **Turbo**, 8 steps, guidance 0.
+- **mask** - 1 = generate (ComfyUI mask-editor convention). **`pad_left/right/top/bottom`**
+  add outpaint canvas. **`seam_px`** (32) is regenerated around the mask so it blends.
+- **`restore_s1/s2/s3`** - `on` pins kept regions every step, `structure` pins while sigma >
+  `structure_release_sigma` (0.4) then frees the low-noise detail steps, `auto` = `on` when
+  the source has the stage's resolution else `structure`, `off` lets the stage rewrite.
+  Defaults on / auto / auto keep identity through S2/S3 without forcing upsampled blur.
+- **`adapter_s1/s2/s3`** - adapter conditioning per stage (default S1 only; trained at
+  <= 1024 px targets).
+- Stage 1 follows the **canvas aspect** at `s1_megapixels` unless width/height are set;
+  `crop_bottom` is disabled for paint runs.
+- **Paint Composite** pastes the source back with a feathered edge for pixel-exact
+  preservation (the Outpaint adapter's post step; AnyPaint does not need it).
+
+## Edits (Krea 2 Identity Edit)
+
+```
+Load Image -> Eric Krea2 Edit (instruction) -> (edit) Multi-Stage Ultra
+Multi-LoRA Stack: krea2_identity_edit_v1_2  S1 = 1.0, S2 = 0, S3 = 0
+```
+
+Instruction editing - recolor, restyle, re-pose, add / replace / remove objects, outpaint,
+try-on, person-into-scene - with the **Krea 2 Identity Edit** LoRA
+(`conradlocke/krea2-identity-edit`, v1.2; full or the near-identical r128 / r64 files).
+Two conditioning paths, exactly as the LoRA was trained:
+
+- **appearance** - the clean VAE-encoded source sits in the sequence as
+  `[text | source (frame 1) | source_b (frame 2) | target (frame 0)]`, shared timestep;
+- **semantics** - the instruction is encoded by Qwen3-VL **together with the source
+  image(s)** ("grounded", natural length - no 512 cap, two 768 px references exceed it).
+
+Settings:
+
+- **`fit_mode`** - `fit` (v1.2 training geometry: AR-preserving resample onto the target
+  grid at a fractional centered offset, any output aspect; byte-identical to krea2edit
+  v1.2.5) or `crop (legacy)` for v1 / v1.1 weights.
+- **`ref_boost`** - reference-fidelity dial: multiplies target -> reference attention
+  (1 = off; ~4 strong likeness; >10 breaks removals; <1 loosens). Applies to the last
+  reference (the subject in two-reference edits); **`ref_boost_a`** is the scene's dial;
+  **`ref_boost_mask`** limits the boost to a region of the last reference (e.g. a face).
+  In tests ref_boost 4 kept the source's silhouette closer (a long coat stayed long when
+  recoloured).
+- **`grounding_px`** - longest side the VLM sees (trained 384-768, default 768): lower =
+  stronger instruction adherence, higher = stronger likeness; lower it if subjects duplicate.
+- **`size_from`** - `source`: Stage 1 takes the source aspect at `s1_megapixels` (Ultra
+  width/height still win); `ultra settings`: Ultra decides and `fit` handles the mismatch
+  (wide outpaints).
+- **`ground_negative`** - with CFG on, the negative is the empty instruction grounded on
+  the same image - the trained unconditional.
+- **`source_image_b`** - second reference (the subject) for person-into-scene; place two
+  people in ONE pass rather than chaining edits.
+
+Recipe notes (model card + our tests):
+
+- **Turbo, 8-12 steps, guidance off** for most edits; Stage 1 **<= 2 MP** (warned above
+  2.2 MP - sources bleed / subjects duplicate). Let S2/S3 upscale.
+- **Stages 2/3** run stock (no sources) and refine with **Ultra's `prompt` text** - describe
+  the edited image there; empty prompt = they reuse the grounded instruction.
+- **Removals** are the weak spot. The card's recipe is **Raw, ~20 steps, CFG 3**
+  (`s1_cfg` 2.0 - Krea's g, CFG = 1 + g) with `ground_negative` on; in our test even that
+  removed *both* people for "remove the person in the background". Word removals by what to
+  keep.
+- Prefer ODE samplers (euler, RES, DEIS) for outpainting - SDE churn breaks the reference
+  copy channel.
+- Cost: the source doubles the image tokens (~3.1 s/step at 1.5 MP on an RTX PRO 5000 vs
+  1.3 s for plain text-to-image); ref_boost adds ~6%.
+- `crop_bottom` is disabled for edit runs; with `prompt_conditioning` also connected, the
+  edit's grounded conditioning wins (printed).
+
+## Negative guidance (NAG & NegPiP)
+
+```
+Eric Krea2 Negative Guidance -> (guidance) Multi-Stage Ultra
+```
+
+Both are **off by default**, both work at **guidance 0** (Turbo), and they can be combined
+with each other and with an edit. Ultra's `negative_prompt` stays the CFG negative.
+
+**NAG - Normalized Attention Guidance.** A negative text stream (`nag_negative`) runs
+through the blocks next to the positive one. For the image queries the attention output is
+pushed away from the negative and renormalised:
+`z = z+ + phi (z+ - z-)`, L1 ratio clamped to `tau`, blended `alpha` into the positive.
+Text and edit-source tokens keep their positive attention.
+
+- `nag_phi` 4.0, `nag_tau` 2.5, `nag_alpha` 0.25 (the published defaults),
+  `nag_stages` s1 / s1_s2 / all, `nag_sigma_start/end` limit it to a sigma window.
+- In tests it suppressed an unwanted feature (wings on a llama-bird) cleanly with a small
+  remnant. Cost: ~+23% per step on text-to-image, ~+12% on edits (single pass - CFG would
+  be +100%).
+
+**NegPiP.** Write `(phrase:-1.0)` in Ultra's prompt or the Edit instruction: that phrase's
+attention **values** are multiplied by its weight inside the joint blocks, so a negative
+weight subtracts the concept instead of adding it.
+
+- `negpip_mode` - `in_place` (default; the phrase stays where it is, its tokens are flagged -
+  cleanest in tests) or `lifted` (the phrase is removed and encoded on its own, appended).
+- `negpip_strength` multiplies every negative weight; `negpip_block_start/end` limit the
+  blocks; `negpip_text_fusion` also flips inside the text-fusion attention (stronger).
+- Positive weights are stripped (Krea 2 conditioning has no prompt weighting). With a
+  precomputed `prompt_conditioning` (Vision Prompt) the text can't be parsed - put the
+  groups in Ultra's prompt instead. Cost ~0.
+
+**Using both** on the same concept over-suppressed in tests (dark patches) - pick one per
+concept.
+
+All three features (edit sources + ref_boost, NAG, NegPiP) share one exact attention core:
+keys are attended group by group and merged by log-sum-exp, so ref_boost needs no dense
+L x L bias (which would force slow SDPA and run out of memory at 3 MP) and NAG's positive
+and negative passes share the expensive image attention. Verified against dense reference
+implementations (docs/tools/test_edit_guidance_math.py).
+
+## Native quantized compute
+
+**Component Loader → `compute`** (`bf16` default | `native`) and **`native_format`**
+(`keep` | `int8` | `mxfp8` | `nvfp4`), both appended.
+
+`bf16` dequantizes every checkpoint to bf16 (best image quality). `native` re-quantizes the
+28 joint blocks' 224 Linear layers after loading and runs them on ComfyUI's `comfy_kitchen`
+tensor-core kernels - the same path ComfyUI core uses; everything else stays bf16.
+
+- `keep` uses the checkpoint's own format (INT8 → int8-ConvRot when the file is rotated,
+  MXFP8, NVFP4, fp8); a bf16 / GGUF source falls back to mxfp8. Explicit `int8` / `mxfp8` /
+  `nvfp4` quantize any source on load. NVFP4 uses a dynamic per-call activation scale.
+- Requires `precision` bf16 and a CUDA device.
+- **LoRAs work:** PEFT LoRAs run their delta in bf16 on top of the quantized layer (effect
+  identical to bf16 in tests); direct-merge LoRAs (LoKr / LoHa / diff) become exact bf16
+  side terms instead of being written into the quantized weights.
+- **Image quality:** activations are quantized too, so results differ slightly from bf16 -
+  at the same seed, typically 26-30 dB PSNR (looks the same side by side); fp8 can shift
+  composition a little. Your call per workflow.
+
+Measured, RTX PRO 5000, Ultra S1-only 3 MP, 8 steps:
+
+| checkpoint (`keep` →) | bf16 s/step / VRAM | native s/step / VRAM |
+|---|---|---|
+| INT8-ConvRot (int8_convrot) | 2.9 / 34.8 GB | **2.0 / 22.9 GB** |
+| same + a style LoRA | 3.1 / 35.3 GB | **2.2 / 22.9 GB** |
+| MXFP8 (mxfp8) | 2.9 / 35.0 GB | **2.1 / 23.3 GB** |
+| fp8-scaled (fp8) | 2.9 / 35.1 GB | **2.0 / 22.9 GB** |
+
+Headless bench (same card): nvfp4 1.75 s/step (1.67x). The gain shrinks at 8 MP, where
+attention (untouched by quantization) dominates the step.
+
+## Quantized checkpoints the Component Loader reads
+
+Single-file transformers are dequantized on load (on the GPU): **fp8** (bare / scaled),
+**INT8** and **INT8-ConvRot** (group-wise Hadamard un-rotation), and - through
+`comfy_kitchen`'s own layouts, mirroring `comfy/ops.py` - **MXFP8**, **NVFP4**,
+**ConvRot-W4A4**, **W4A8** and **W6A8**. GGUF loads as before (dequantize on load).
+`docs/tools/krea2_checkpoint_inspector.py` reports any file's format and whether it loads,
+without loading it. Note: a file's *name* is not proof of its format - one "INT8-ConvRot"
+download in testing was actually bf16 (the loader logs what it found).
+
+## DeGrid (VAE 2-pixel lattice)
+
+The Qwen-Image VAE leaves a faint fixed-phase 2-pixel grid in decoded images (strongest in
+flat / dark areas), and the spacepxl 2x upscale VAE builds its output with a 2x2
+`pixel_shuffle`. When an inter-stage VAE hop decodes, upsamples and re-encodes, that lattice
+is fed into the next stage, which can develop it into a weave-like texture. DeGrid is an
+exact 2-pixel notch filter (filter core from lunaaispace-eng/ComfyUI-DeGrid), amplitude-
+limited so real edges pass, and an image with no detected lattice is left untouched.
+
+- **Eric Krea2 DeGrid** - standalone node for any image: `mode` auto / manual (`limit`),
+  `skip_when_clean`, and a `removed_grid` preview (x `grid_gain`) + report. Put it straight
+  after a decode, before sharpening / resizing.
+- **`degrid`** toggle on **Upscale Decode (2x)** and **VAE Decode** (appended).
+- **Ultra `degrid`** (appended): `hops` cleans the inter-stage VAE upscale before re-encoding
+  (no effect on plain latent hops - they have no pixel step), `final` cleans the decoded
+  output, `hops+final` both. The console prints the measured grid amplitude per pass.
+
+## LoRA search & suggestions
+
+- **🔍 Search popup** - click the **middle** of a LoRA dropdown on the Multi-LoRA Stack,
+  Apply LoRA or Diagnose LoRA node: a search box over filenames, folders, trigger words and
+  **LoRA Catalog** cards (name, role, effect text, artists, depicts, facet tags). The arrow
+  zones still step prev / next, Shift+click opens the native list, and right-click the node
+  → "Search LoRA ..." per slot is a fallback. No widgets are added - saved workflows are
+  untouched. Catalog location: env `ERIC_LORA_CATALOG`, else video_prompter's config,
+  else `L:/Models/loras/_lora_catalog.sqlite`; a missing catalog just means fewer fields.
+- **`suggestions` socket** on the Multi-LoRA Stack - LoRAs picked by the LoRA Suggester
+  (video_prompter) are added after the panel's own slots with their per-stage weights and
+  trigger words; a file already in the stack is not added twice.
 
 ## Two high-res strategies
 
@@ -727,6 +1093,9 @@ it needs) is allowed on a distilled model:
 
 Using a real negative prompt on a distilled/Turbo checkpoint at all is unusual - most
 Turbo pipelines simply can't feed one.
+
+For negatives **without** a second pass, see [NAG / NegPiP](#negative-guidance-nag--negpip) -
+both work at g = 0.
 
 ## Parameter sweeps
 
@@ -909,6 +1278,24 @@ cell's PNG chunk records what actually applied.
   visual/material/camera descriptions work best; quote words to render as text.
   For best expander fidelity, download Krea's `expansion.txt` and point the Magic
   Prompt node's `system_prompt_path` at it.
+- **Attention is mask-safe (Oct 2026).** diffusers' `flash_varlen` backend assumes the
+  valid keys are a prefix; Krea 2 pads text in the *middle* of `[text | image]`, so with
+  `attention_backend=auto` every generation attended to padding and dropped the bottom image
+  rows (the bottom band `crop_bottom` was hiding, plus weaker prompt adherence). All Krea 2
+  attention now drops padded keys explicitly before the kernel - same speed as before, matches
+  SDPA. Existing seeds render slightly differently (correctly to the edge); `crop_bottom`
+  should no longer be needed.
+- **VRAM on model switches (Oct 2026).** LoRA / LoRA-stack / Unload-LoRA outputs and older
+  loader outputs kept in ComfyUI's cache used to pin the previous model, and a reference cycle
+  kept a released pipeline alive until the next model was already loading - both caused
+  out-of-memory on checkpoint switches (48 GB cards). Fixed; if a released pipeline ever
+  survives, the loader logs who still references it.
+- **LoKr files from ai-toolkit (Oct 2026).** Krea 2 LoKr / LoHa LoRAs saved with the
+  original model's key names (`diffusion_model.blocks.N.attn.wq...`) used to load with 0
+  modules applied, so the LoRA silently did nothing. They are now remapped, injected with the
+  file's own Kronecker factor, and scaled by ComfyUI's LoKr rule (full w1/w2 = strength).
+- **Text encoder offload.** For style and edit runs on cards under 64 GB with guidance off, the
+  prompt is encoded once and the Qwen3-VL encoder parks on the CPU for the run (restored after).
 
 ## Credits & licenses
 
@@ -932,7 +1319,32 @@ cell's PNG chunk records what actually applied.
   [ostris/ComfyUI-Krea2-Ostris-Edit](https://github.com/ostris) for the ComfyUI-core
   implementation. This is an independent diffusers-side reimplementation verified
   line-by-line against the installed `transformer_krea2.py`, not a port.
+- **Control-LoRA:** mechanism from Tanmay Patil's
+  [Krea-2-controlnet](https://github.com/Tanmaypatil123/Krea-2-controlnet) reference pipeline
+  (weights `Patil/Krea-2-depth-controlnet`) and the
+  [facok/comfyui-krea2-controlnet](https://github.com/facok/comfyui-krea2-controlnet) port;
+  reimplemented for the diffusers transformer.
+- **Style Reference:** mechanism ported from
+  [nkxx188/ComfyUI-Krea2-StyleTransfer](https://github.com/nkxx188/ComfyUI-Krea2-StyleTransfer)
+  (MIT, (c) 2026 jieg9341-lab).
+- **Inpaint / outpaint:** yijunwang2's Krea 2 AnyPaint / Outpaint functional adapters (pipeline
+  code Apache-2.0); isolated kv_cache reference attention: ostris / ai-toolkit.
+- **Edits:** [lbouaraba/comfyui-krea2edit](https://github.com/lbouaraba/comfyui-krea2edit) v1.2.5
+  and [krea2edit-trainer](https://github.com/lbouaraba/krea2edit-trainer) (Apache-2.0) - the fit
+  geometry and ref_boost are ported; weights
+  [conradlocke/krea2-identity-edit](https://huggingface.co/conradlocke/krea2-identity-edit)
+  (Krea 2 Community License).
+- **NAG:** Normalized Attention Guidance by Dar-Yen Chen
+  ([ChenDarYen/ComfyUI-NAG](https://github.com/ChenDarYen/ComfyUI-NAG), MIT); Krea 2 placement
+  after [iljung1106/ComfyUI-Krea2-NAG](https://github.com/iljung1106/ComfyUI-Krea2-NAG) (MIT).
+- **NegPiP:** the idea is hako-mikan's
+  [sd-webui-negpip](https://github.com/hako-mikan/sd-webui-negpip); this is a clean
+  reimplementation - no code from the AGPL Krea 2 NegPiP port was used.
+- **DeGrid:** notch-filter core ported from
+  [lunaaispace-eng/ComfyUI-DeGrid](https://github.com/lunaaispace-eng/ComfyUI-DeGrid) (Apache-2.0).
+- **Native quantized compute / kitchen formats:** ComfyUI's `comfy_kitchen` kernels and layouts.
 - **Nodes:** Eric Hiss (GitHub: EricRollei).
 
 These nodes are an independent implementation; no code is copied from Krea or
-spacepxl repos.
+spacepxl repos. Where a mechanism was ported from a permissively licensed project
+(Apache-2.0 / MIT, listed above), the module header carries the attribution.

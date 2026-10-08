@@ -233,7 +233,8 @@ def decode_latents_with_upscale_vae(packed_latents, upscale_vae, pipe_vae,
 # ═══════════════════════════════════════════════════════════════════════
 
 def upscale_between_stages(packed_latents, upscale_vae, pipe_vae,
-                           height, width, vae_scale_factor=8, target_h=None, target_w=None):
+                           height, width, vae_scale_factor=8, target_h=None, target_w=None,
+                           degrid=False):
     """Decode at 2x via the upscale VAE, re-encode with the standard VAE.
 
     Returns ``(packed_latents, new_h, new_w)`` at 2x pixel resolution, latents in
@@ -242,6 +243,10 @@ def upscale_between_stages(packed_latents, upscale_vae, pipe_vae,
     resampled DOWN to that target (bicubic + antialias) before re-encoding - this
     keeps the upscale VAE's learned detail but at a caller-chosen size instead of a
     forced 4x area (used by the 's2-s3 with downsample' modes).
+
+    ``degrid=True`` removes the 2px pixel lattice (pixel_shuffle structure of the
+    upscale VAE) from the 2x pixels BEFORE any resample and BEFORE re-encoding, so
+    it is never baked into the next stage's latent (see _degrid.py).
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     up_dtype = next(upscale_vae.parameters()).dtype
@@ -263,6 +268,15 @@ def upscale_between_stages(packed_latents, upscale_vae, pipe_vae,
         decoded = decoded.squeeze(2)
         pixels_2x = F.pixel_shuffle(decoded, upscale_factor=2)  # [B, 3, 2H, 2W], [-1, 1]
         del decoded, spatial
+        if degrid:
+            # Before the resample: the lattice is phase-locked to THIS 2x pixel grid;
+            # after a non-2:1 resample it aliases and can no longer be notched exactly.
+            from ._degrid import degrid_signed_bchw, format_stats
+            try:
+                pixels_2x, _dg_stats = degrid_signed_bchw(pixels_2x)
+                print(format_stats(_dg_stats, "inter-stage hop (pre re-encode)"))
+            except Exception as _e:  # never let a cleanup pass kill a generation
+                print(f"[EricKrea2-DeGrid] inter-stage hop skipped ({type(_e).__name__}: {_e})")
         if target_h and target_w and (int(target_h) < pixels_2x.shape[2]
                                       or int(target_w) < pixels_2x.shape[3]):
             # Free the upscale VAE weights off the GPU BEFORE the resample: the

@@ -273,10 +273,42 @@ def _load_lokr_adapter(pipe, state_dict: dict, adapter_name: str,
     try:
         _load_lokr_adapter_peft(pipe, state_dict, adapter_name, log_prefix)
     except (ValueError, RuntimeError) as peft_err:
-        print(f"{log_prefix} PEFT injection failed: {peft_err}")
-        print(f"{log_prefix} Falling back to direct weight merge...")
+        print(f"{log_prefix} PEFT injection failed: {str(peft_err)[:300]}")
+        n = _purge_failed_peft_adapter(pipe.transformer, adapter_name)
+        print(f"{log_prefix} Falling back to direct weight merge... (cleaned {n} half-injected layer(s))")
         _load_lokr_adapter_direct(pipe, state_dict, adapter_name, log_prefix,
                                   weight=weight)
+
+
+def _lokr_file_factor(state_dict) -> int:
+    """Kronecker factor the file was trained with = rows of the (square) lokr_w1 factors when
+    they agree across modules (ai-toolkit Krea2 LoKr: 8). -1 = let PEFT choose (sqrt)."""
+    from collections import Counter
+    c = Counter(int(v.shape[0]) for k, v in state_dict.items()
+                if k.endswith(".lokr_w1") and getattr(v, "ndim", 0) == 2 and v.shape[0] == v.shape[1])
+    if not c:
+        return -1
+    f, n = c.most_common(1)[0]
+    return f if n >= 0.9 * sum(c.values()) else -1
+
+
+def _purge_failed_peft_adapter(transformer, adapter_name):
+    """Remove a half-injected adapter from PEFT tuner layers (zero-init wrappers left behind by
+    a failed set_peft_model_state_dict) so the direct-merge fallback is not shadowed."""
+    n = 0
+    for m in transformer.modules():
+        fn = getattr(m, "delete_adapter", None)
+        names = getattr(m, "active_adapters", None)
+        if callable(fn) and hasattr(m, "base_layer"):
+            try:
+                fn(adapter_name)
+                n += 1
+            except Exception:
+                pass
+    pc = getattr(transformer, "peft_config", None)
+    if isinstance(pc, dict):
+        pc.pop(adapter_name, None)
+    return n
 
 
 def _load_lokr_adapter_peft(pipe, state_dict: dict, adapter_name: str,
@@ -289,11 +321,12 @@ def _load_lokr_adapter_peft(pipe, state_dict: dict, adapter_name: str,
     # Use a very large r so that PEFT creates full (non-decomposed) w1/w2
     # matrices.  alpha = r gives unit scaling (1.0).
     cfg_r = 100000
+    factor = _lokr_file_factor(state_dict)
     config = LoKrConfig(
         r=cfg_r,
         alpha=float(cfg_r),
         decompose_both=False,
-        decompose_factor=-1,       # default factorization (near square-root)
+        decompose_factor=factor,   # the FILE's Kronecker factor (-1 = PEFT default sqrt)
         target_modules=["_dummy"],  # will be overridden by state_dict keys
     )
 
@@ -361,24 +394,22 @@ def _load_lokr_adapter_direct(pipe, state_dict: dict, adapter_name: str,
             skipped += 1
             continue
 
-        # Compute scaling factor.
-        # When alpha IS stored, use alpha / r (LyCORIS convention).
-        # When alpha is NOT stored, assume weights are pre-scaled → 1.0.
-        alpha = params.get("alpha")
-        if alpha is not None:
-            alpha_val = alpha.item()
-            r_val = min(w1.shape) if w1.ndim >= 2 else 1
-            scale = (alpha_val / r_val) * weight if r_val > 0 else weight
-        else:
-            scale = weight
+        # Scaling - ComfyUI's LoKr rule (comfy weight_adapter): alpha / dim applies only when
+        # a factor is DECOMPOSED (dim = that factor's rank); full lokr_w1 + lokr_w2 -> 1.0.
+        # (ai-toolkit stores alpha ~1e10 for full-rank LoKr; the old alpha / min(w1.shape) rule
+        # would have scaled those deltas by ~1e9.) This path only handles full w1/w2.
+        scale = weight
 
         # Compute delta = kron(w1, w2) * scale
         w1f = w1.float()
         w2f = w2.float()
         delta = torch.kron(w1f, w2f) * scale
 
-        # Match to model param.  LoKR targets ".weight" by default.
+        # Match to model param.  LoKR targets ".weight" by default; a PEFT-wrapped module
+        # (another adapter already loaded) holds it as "<mod>.base_layer.weight".
         target_key = mod_path + ".weight"
+        if target_key not in model_sd and (mod_path + ".base_layer.weight") in model_sd:
+            target_key = mod_path + ".base_layer.weight"
         if target_key not in model_sd:
             # Try without .weight suffix
             target_key = mod_path
@@ -397,6 +428,10 @@ def _load_lokr_adapter_direct(pipe, state_dict: dict, adapter_name: str,
                 skipped += 1
                 continue
 
+        from ._native_quant import merge_param_delta as _nq_merge
+        if _nq_merge(transformer, target_key, param, delta):   # native-quant weight
+            applied += 1
+            continue
         # Store original weights for potential unloading
         backup_key = f"_lokr_backup_{adapter_name}"
         if not hasattr(transformer, backup_key):
@@ -565,6 +600,10 @@ def _load_loha_adapter_direct(pipe, state_dict: dict, adapter_name: str,
                 skipped += 1
                 continue
 
+        from ._native_quant import merge_param_delta as _nq_merge
+        if _nq_merge(transformer, target_key, param, delta):   # native-quant weight
+            applied += 1
+            continue
         backup_key = f"_loha_backup_{adapter_name}"
         if not hasattr(transformer, backup_key):
             setattr(transformer, backup_key, {})
@@ -830,6 +869,10 @@ def _load_lora_adapter_direct(pipe, state_dict: dict, adapter_name: str,
                 skipped += 1
                 continue
 
+        from ._native_quant import merge_param_delta as _nq_merge
+        if _nq_merge(transformer, target_key, param, delta):   # native-quant weight
+            applied += 1
+            continue
         # Backup for unloading
         backup_key = f"_lora_backup_{adapter_name}"
         if not hasattr(transformer, backup_key):
@@ -967,6 +1010,47 @@ def _map_krea_module(tok: str):
     if m and m.group(3) in _KREA_LEAF:
         return f"text_fusion.{m.group(1)}_blocks.{m.group(2)}.{_KREA_LEAF[m.group(3)]}"
     return None
+
+
+_LYCORIS_SUFFIXES = ("lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b",
+                     "lokr_t2", "hada_w1_a", "hada_w1_b", "hada_w2_a", "hada_w2_b", "hada_t1",
+                     "hada_t2", "alpha", "dora_scale")
+
+
+def _remap_krea_lycoris_keys(state_dict, log_prefix="[LoRA]"):
+    """ORIGINAL-format Krea LyCORIS (LoKr / LoHa) keys -> diffusers module paths
+    (``diffusion_model.blocks.0.attn.wq.lokr_w1`` -> ``transformer_blocks.0.attn.to_q.lokr_w1``),
+    via the same module map as the low-rank converter. Returns the dict unchanged when it is
+    not a Krea-original LyCORIS file (< 50% of its modules map). 2026-10-08."""
+    if not any(k.endswith((".lokr_w1", ".lokr_w2", ".hada_w1_a", ".lokr_w1_a")) for k in state_dict):
+        return state_dict
+    out, mods, mapped = {}, set(), set()
+    for k, v in state_dict.items():
+        base = sfx = None
+        for s in _LYCORIS_SUFFIXES:
+            if k.endswith("." + s):
+                base, sfx = k[: -len(s) - 1], s
+                break
+        if base is None:
+            out[k] = v
+            continue
+        mods.add(base)
+        b = base
+        for pre in ("model.diffusion_model.", "diffusion_model.", "lycoris_", "lora_unet_"):
+            if b.startswith(pre):
+                b = b[len(pre):]
+                break
+        diff = _map_krea_module(b.replace(".", "_"))
+        if diff is None:
+            out[k] = v
+            continue
+        mapped.add(base)
+        out[f"{diff}.{sfx}"] = v
+    if not mods or len(mapped) < 0.5 * len(mods):
+        return state_dict
+    print(f"{log_prefix} Krea original-format LyCORIS: remapped {len(mapped)}/{len(mods)} "
+          "module(s) to diffusers naming")
+    return out
 
 
 def _krea_key_parts(key: str):
@@ -1204,6 +1288,10 @@ def _apply_krea_direct_deltas(pipe, deltas, adapter_name, log_prefix="[LoRA]",
                           f"{tuple(delta.shape)} vs {tuple(param.shape)}, skipping")
                     skipped += 1
                     continue
+            from ._native_quant import merge_param_delta as _nq_merge
+            if _nq_merge(transformer, target_key, param, dv * float(weight)):  # native quant
+                applied += 1
+                continue
             if target_key not in backup:
                 backup[target_key] = param.data.clone()
             param.data.add_((dv * float(weight)).to(dtype=param.dtype,
@@ -1312,6 +1400,7 @@ def load_lora_with_key_fix(pipe, lora_path: str, adapter_name: str,
                   f"was applied (0 low-rank matched, 0 diffs merged); skipping.")
         return
 
+    state_dict = _remap_krea_lycoris_keys(state_dict, log_prefix)
     state_dict = _normalize_keys(state_dict, model=transformer)
 
     adapter_type = _detect_adapter_type(state_dict)
@@ -1493,6 +1582,16 @@ def unload_all_loras(pipe, log_prefix="[EricKrea2-LoRA]"):
         ``_loha_backup_<adapter>`` — this prevents deltas from accumulating
         across runs (each generate() realizes the stack fresh)."""
     transformer = getattr(pipe, "transformer", None)
+
+    # 0) Native-quant LoRA side deltas (see _native_quant.merge_param_delta).
+    if transformer is not None:
+        try:
+            from ._native_quant import clear_param_deltas
+            _nqd = clear_param_deltas(transformer)
+            if _nqd:
+                print(f"{log_prefix} cleared {_nqd} native-quant direct-merge delta(s)")
+        except Exception:
+            pass
 
     # 1) Restore sticky direct-merge backups (baked into base weights).
     if transformer is not None:

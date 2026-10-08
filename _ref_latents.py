@@ -207,21 +207,15 @@ def encode_refs_at_dims(pipe, bundle, target_w: int, target_h: int, encode_vae=N
               "packed latents as-is. Re-run the Eric Krea2 Reference Latents node (with "
               "edit_recipe=edit_frame) to enable the pixel-space fit.")
         return bundle
-    packed_list, grids, sizes = [], [], []
+    from ._edit_geom import fit_source, ref_position_ids
+    packed_list, grids, sizes, ref_pos = [], [], [], []
     tw, th = int(target_w), int(target_h)
     for idx, image in enumerate(images):
-        im = image[:1].to(torch.float32)
-        h, w = int(im.shape[1]), int(im.shape[2])
-        tgt_ar = tw / max(1, th)
-        src_ar = w / max(1, h)
-        if abs(src_ar - tgt_ar) / max(tgt_ar, 1e-6) > 0.02:
-            print(f"[EricKrea2-Ref] edit_frame: source {idx + 1} aspect ({w}x{h}) != target "
-                  f"({tw}x{th}) - stretching to fit. Same-AR pairs preserve identity best "
-                  "(the edit LoRAs are trained on same-size pairs).")
-        if (h, w) != (th, tw):
-            im = torch.nn.functional.interpolate(
-                im.permute(0, 3, 1, 2), size=(th, tw), mode="bilinear",
-                align_corners=False).permute(0, 2, 3, 1)
+        h, w = int(image.shape[1]), int(image.shape[2])
+        # 2026-10-08: krea2edit v1.2 `fit` geometry (was a plain stretch): AR-preserving
+        # resample onto the target grid at a fractional centered offset - see _edit_geom.
+        im, plan = fit_source(image[:1].to(torch.float32), tw, th, "fit")
+        ref_pos.append(ref_position_ids(plan, idx + 1))
         packed, enc_h, enc_w = standard_encode(pipe, im, encode_vae=encode_vae)
         p = pipe.patch_size
         gh = (enc_h // pipe.vae_scale_factor) // p
@@ -232,7 +226,8 @@ def encode_refs_at_dims(pipe, bundle, target_w: int, target_h: int, encode_vae=N
         print(f"[EricKrea2-Ref] edit_frame: source {idx + 1} pixel-fit {w}x{h} -> {tw}x{th}, "
               f"grid {gh}x{gw} ({gh * gw} tokens)")
     out = dict(bundle)
-    out.update({"packed": packed_list, "grids": grids, "sizes": sizes})
+    out.update({"packed": packed_list, "grids": grids, "sizes": sizes, "ref_pos": ref_pos,
+                "target_grid": (th // 16, tw // 16)})
     return out
 
 
@@ -283,7 +278,14 @@ def install_ref_latents(pipe, bundle, verbose: bool = True, recipe: str = "ostri
         B, img_len, _ = hidden_states.shape
         txt_len = encoder_hidden_states.shape[1]
 
-        if edit_mode and any(gh * gw != img_len for (gh, gw) in grids):
+        _tg = bundle.get("target_grid")
+        if _tg is not None:
+            _ip = position_ids[-img_len:]
+            _cur = (int(_ip[:, 1].max().item()) + 1, int(_ip[:, 2].max().item()) + 1)
+            _miss = tuple(_cur) != tuple(_tg)
+        else:
+            _miss = any(gh * gw != img_len for (gh, gw) in grids)
+        if edit_mode and _miss:
             # Stage grid != source grid: the edit recipe is trained on SAME-SIZE
             # pairs at <=2MP, so it conditions only the matching-size stage
             # (Stage 1 in a multistage run); upscale stages run stock.
@@ -299,8 +301,12 @@ def install_ref_latents(pipe, bundle, verbose: bool = True, recipe: str = "ostri
 
         # 1) reference tokens + their rotary rows (axis-0 = i+1, h/w grid from 0)
         ref_toks, ref_rows = [], []
+        _rp = bundle.get("ref_pos") if edit_mode else None
         for i, (pk, (gh, gw)) in enumerate(zip(packed_list, grids)):
             ref_toks.append(pk.to(device=device, dtype=dtype).expand(B, -1, -1))
+            if _rp is not None:
+                ref_rows.append(_rp[i].to(device))
+                continue
             rid = torch.zeros(gh, gw, 3, device=device)
             rid[..., 0] = float(i + 1)
             rid[..., 1] = torch.arange(gh, device=device, dtype=torch.float32)[:, None]
@@ -334,10 +340,16 @@ def install_ref_latents(pipe, bundle, verbose: bool = True, recipe: str = "ostri
         # 4) embed through the model's own modules; image-token order per recipe
         ctx = tr.text_fusion(encoder_hidden_states, attention_mask=text_mask)
         ctx = tr.txt_in(ctx)
-        if edit_mode:
-            img = tr.img_in(torch.cat([ref_tok, hidden_states], dim=1))
-        else:
-            img = tr.img_in(torch.cat([hidden_states, ref_tok], dim=1))
+        # target embedded alone (Control-LoRA's img_in hook expands exactly the target
+        # grid); the reference span separately, flagged so control hooks skip it
+        # (2026-10-08 - concatenated, control was silently not applied).
+        img_t = tr.img_in(hidden_states)
+        tr._eric_ctrl_skip = True
+        try:
+            img_r = tr.img_in(ref_tok)
+        finally:
+            tr._eric_ctrl_skip = False
+        img = torch.cat([img_r, img_t], dim=1) if edit_mode else torch.cat([img_t, img_r], dim=1)
         h = torch.cat([ctx, img], dim=1)
         live_start = (txt_len + ref_len) if edit_mode else txt_len  # first live image token
         live_end = live_start + img_len

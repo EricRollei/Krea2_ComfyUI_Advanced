@@ -274,6 +274,16 @@ def register_routes():
 
     routes = PromptServer.instance.routes
 
+    @routes.get("/eric_krea2/lora_search_index")
+    async def _lora_search_index_route(request):
+        # 🔍 LoRA search popup: dropdown names joined to trigger cache + LoRA Catalog cards.
+        try:
+            from ._lora_search import build_index
+            return web.json_response(build_index())
+        except Exception as e:
+            return web.json_response({"entries": [], "error": f"{type(e).__name__}: {e}"},
+                                     status=500)
+
     @routes.post("/eric_krea2/save_preset")
     async def _save_preset_route(request):
         try:

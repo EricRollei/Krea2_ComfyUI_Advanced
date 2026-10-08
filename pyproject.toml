@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eric_krea2"
-version = "1.5.0"
-description = "Self-contained ComfyUI custom nodes for Krea 2 (Raw/Turbo): text-to-image, multi-stage high-res, 2x upscale-decode, LoRA stack, conditioning rebalance, and recipe presets."
+version = "1.6.0"
+description = "Self-contained ComfyUI custom nodes for Krea 2 (Raw/Turbo): text-to-image, multi-stage high-res, Control-LoRA, style reference, inpaint/outpaint, edits, NAG/NegPiP negative guidance, native quantized compute, DeGrid, LoRA stack/search, and recipe presets."
 authors = [{ name = "Eric Hiss" }]
 readme = "README.md"
 license = { file = "LICENSE.md" }
 requires-python = ">=3.10"
-keywords = ["comfyui", "krea", "krea2", "diffusers", "text-to-image", "flow-matching"]
+keywords = ["comfyui", "krea", "krea2", "diffusers", "text-to-image", "flow-matching", "controlnet", "inpaint", "outpaint", "image-edit", "style-transfer", "quantization"]
 
 # Kept in sync with requirements.txt. torch / numpy / Pillow / requests /
 # safetensors are provided by ComfyUI and deliberately omitted so this pack
