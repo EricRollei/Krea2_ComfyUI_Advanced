@@ -69,3 +69,8 @@ _tmp_*.py
 # personal overrides). Comment these out if you DO want to publish your presets.
 # ultra_presets.json
 # cond_presets.json
+
+# Dev-only test/bench scripts and scratch data (kept locally). The checkpoint
+# inspector is documented in the README, so it stays tracked.
+docs/tools/*
+!docs/tools/krea2_checkpoint_inspector.py
