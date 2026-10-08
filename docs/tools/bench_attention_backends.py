@@ -2,6 +2,7 @@
 L = 512 text + image tokens): flash-attn 2 (current), torch SDPA (flash / cuDNN / efficient),
 SageAttention 2 (auto + explicit int8/fp8 kernels), xformers. Speed (ms per call) and accuracy vs an
 fp32 reference on a query subsample (rel L2 err + cosine). Usage: python bench_attention_backends.py"""
+
 import math, time
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,7 @@ def backends():
     out = {}
     try:
         from flash_attn import flash_attn_func
+
         out["flash_attn2 (current)"] = lambda q, k, v: flash_attn_func(q, k, v)
     except Exception as e:
         print("flash_attn missing", e)
@@ -40,36 +42,60 @@ def backends():
 
     def sdpa(kind):
         from torch.nn.attention import sdpa_kernel, SDPBackend
-        b = {"flash": SDPBackend.FLASH_ATTENTION, "cudnn": SDPBackend.CUDNN_ATTENTION,
-             "efficient": SDPBackend.EFFICIENT_ATTENTION}[kind]
+
+        b = {
+            "flash": SDPBackend.FLASH_ATTENTION,
+            "cudnn": SDPBackend.CUDNN_ATTENTION,
+            "efficient": SDPBackend.EFFICIENT_ATTENTION,
+        }[kind]
 
         def f(q, k, v):
             with sdpa_kernel(b):
                 return F.scaled_dot_product_attention(
-                    q.transpose(1, 2), k.repeat_interleave(rep, 2).transpose(1, 2),
-                    v.repeat_interleave(rep, 2).transpose(1, 2)).transpose(1, 2)
+                    q.transpose(1, 2),
+                    k.repeat_interleave(rep, 2).transpose(1, 2),
+                    v.repeat_interleave(rep, 2).transpose(1, 2),
+                ).transpose(1, 2)
+
         return f
+
     for kind in ("flash", "cudnn", "efficient"):
         out[f"torch sdpa {kind}"] = sdpa(kind)
     try:
         import sageattention as sa
+
         out["sage2 auto"] = lambda q, k, v: sa.sageattn(q, k, v, tensor_layout="NHD")
-        out["sage2 int8qk fp16pv (triton)"] = lambda q, k, v: sa.sageattn_qk_int8_pv_fp16_triton(q, k, v, tensor_layout="NHD")
-        out["sage2 int8qk fp8pv (cuda)"] = lambda q, k, v: sa.sageattn_qk_int8_pv_fp8_cuda(q, k, v, tensor_layout="NHD")
-        out["sage2 int8qk fp16pv (cuda)"] = lambda q, k, v: sa.sageattn_qk_int8_pv_fp16_cuda(q, k, v, tensor_layout="NHD")
+        out["sage2 int8qk fp16pv (triton)"] = (
+            lambda q, k, v: sa.sageattn_qk_int8_pv_fp16_triton(
+                q, k, v, tensor_layout="NHD"
+            )
+        )
+        out["sage2 int8qk fp8pv (cuda)"] = (
+            lambda q, k, v: sa.sageattn_qk_int8_pv_fp8_cuda(
+                q, k, v, tensor_layout="NHD"
+            )
+        )
+        out["sage2 int8qk fp16pv (cuda)"] = (
+            lambda q, k, v: sa.sageattn_qk_int8_pv_fp16_cuda(
+                q, k, v, tensor_layout="NHD"
+            )
+        )
     except Exception as e:
         print("sageattention import failed", e)
     try:
         import xformers.ops as xo
+
         out["xformers"] = lambda q, k, v: xo.memory_efficient_attention(
-            q, k.repeat_interleave(rep, 2), v.repeat_interleave(rep, 2))
+            q, k.repeat_interleave(rep, 2), v.repeat_interleave(rep, 2)
+        )
     except Exception as e:
         print("xformers missing", e)
     return out
 
 
 def tm(f, q, k, v, n=6):
-    f(q, k, v); torch.cuda.synchronize()
+    f(q, k, v)
+    torch.cuda.synchronize()
     t = time.perf_counter()
     for _ in range(n):
         f(q, k, v)
@@ -93,7 +119,9 @@ for name, L in SIZES.items():
             cos = float(F.cosine_similarity(d.flatten(), r.flatten(), dim=0))
             ms = tm(f, q, k, v)
             base = base or ms
-            print(f"  {bn:32s} {ms:8.2f} ms  x{base / ms:4.2f}   rel err {err:.2e}  cos {cos:.6f}")
+            print(
+                f"  {bn:32s} {ms:8.2f} ms  x{base / ms:4.2f}   rel err {err:.2e}  cos {cos:.6f}"
+            )
         except Exception as e:
             print(f"  {bn:32s} FAILED {type(e).__name__}: {str(e)[:120]}")
     del q, k, v

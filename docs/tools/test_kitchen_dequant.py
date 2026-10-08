@@ -28,8 +28,13 @@ PACK = os.path.abspath(os.path.join(HERE, "..", ".."))
 COMFY = os.path.abspath(os.path.join(PACK, "..", ".."))
 BASE = r"H:/Training/Krea-2-Turbo"
 REF = r"A:/Models/diffusion_models/Krea2/krea2_turbo_bf16.safetensors"
-SAMPLES = ["blocks.0.attn.wq.weight", "blocks.5.mlp.down.weight", "blocks.13.attn.wo.weight",
-           "blocks.27.mlp.up.weight", "txtfusion.layerwise_blocks.0.attn.wk.weight"]
+SAMPLES = [
+    "blocks.0.attn.wq.weight",
+    "blocks.5.mlp.down.weight",
+    "blocks.13.attn.wo.weight",
+    "blocks.27.mlp.up.weight",
+    "txtfusion.layerwise_blocks.0.attn.wk.weight",
+]
 
 
 def load_loader():
@@ -51,9 +56,12 @@ def main():
     a = ap.parse_args()
     import torch
     from safetensors import safe_open
+
     L = load_loader()
-    print(f"loader imported; torch {torch.__version__}; device {a.device} = "
-          f"{torch.cuda.get_device_name(torch.device(a.device))}")
+    print(
+        f"loader imported; torch {torch.__version__}; device {a.device} = "
+        f"{torch.cuda.get_device_name(torch.device(a.device))}"
+    )
 
     # ---- phase 1: sample layers vs bf16 base ----
     if a.ckpt.endswith(".gguf"):
@@ -69,19 +77,25 @@ def main():
 def phase1(a, L, torch, safe_open):
     with safe_open(a.ckpt, framework="pt") as f:
         keys = list(f.keys())
-        pre = "model.diffusion_model." if any(k.startswith("model.diffusion_model.") for k in keys) else ""
+        pre = (
+            "model.diffusion_model."
+            if any(k.startswith("model.diffusion_model.") for k in keys)
+            else ""
+        )
         want = set()
         for s in SAMPLES:
             for suf in ("", "_scale", "_scale_2"):
                 if pre + s + suf in keys:
                     want.add(pre + s + suf)
-            m = pre + s[:-len("weight")] + "comfy_quant"
+            m = pre + s[: -len("weight")] + "comfy_quant"
             if m in keys:
                 want.add(m)
         sd = {k: f.get_tensor(k) for k in want}
     confs = L._layer_quant_confs(sd, path=a.ckpt)
     t0 = time.perf_counter()
-    out, n = L._dequant_comfy_quant(sd, torch.bfloat16, log=print, device=a.device, quant_confs=confs)
+    out, n = L._dequant_comfy_quant(
+        sd, torch.bfloat16, log=print, device=a.device, quant_confs=confs
+    )
     print(f"dequantized {n} sample weights in {time.perf_counter() - t0:.2f}s")
     worst = 1.0
     with safe_open(REF, framework="pt") as r:
@@ -93,11 +107,15 @@ def phase1(a, L, torch, safe_open):
                 continue
             w = out[k].double()
             ref = r.get_tensor(s).double()
-            cos = torch.nn.functional.cosine_similarity(w.flatten(), ref.flatten(), dim=0).item()
+            cos = torch.nn.functional.cosine_similarity(
+                w.flatten(), ref.flatten(), dim=0
+            ).item()
             rel = ((w - ref).pow(2).mean().sqrt() / ref.pow(2).mean().sqrt()).item()
             worst = min(worst, cos)
-            print(f"  {s:48s} {tuple(w.shape)} fmt={confs.get(s[:-7], {}).get('format', '-'):6s} "
-                  f"cos={cos:.4f} relRMS={rel:.3f} std={w.std():.4g}/{ref.std():.4g}")
+            print(
+                f"  {s:48s} {tuple(w.shape)} fmt={confs.get(s[:-7], {}).get('format', '-'):6s} "
+                f"cos={cos:.4f} relRMS={rel:.3f} std={w.std():.4g}/{ref.std():.4g}"
+            )
     print(f"PHASE1 {'PASS' if worst > 0.8 else 'FAIL'} (worst cosine {worst:.4f})")
 
 
@@ -105,11 +123,15 @@ def _phase2(a, L, torch):
     # ---- phase 2: full transformer load ----
     t0 = time.perf_counter()
     loader = L.EricKrea2ComponentLoader()
-    m = loader._override_transformer(BASE, a.ckpt, torch.bfloat16, print, device=a.device)
+    m = loader._override_transformer(
+        BASE, a.ckpt, torch.bfloat16, print, device=a.device
+    )
     metas = [n for n, p in m.named_parameters() if p.is_meta]
     nonfinite = [n for n, p in m.named_parameters() if not torch.isfinite(p).all()]
-    print(f"full load {time.perf_counter() - t0:.1f}s | params {sum(p.numel() for p in m.parameters()) / 1e9:.2f}B "
-          f"| meta left {len(metas)} | non-finite {len(nonfinite)}")
+    print(
+        f"full load {time.perf_counter() - t0:.1f}s | params {sum(p.numel() for p in m.parameters()) / 1e9:.2f}B "
+        f"| meta left {len(metas)} | non-finite {len(nonfinite)}"
+    )
     print(f"PHASE2 {'PASS' if not metas and not nonfinite else 'FAIL'}")
 
 

@@ -102,7 +102,10 @@ class EricKrea2Paint:
             m = m.float().cpu()
             if tuple(m.shape) == (ch, cw) and (ch, cw) != (sh, sw):
                 gen = (m > 0.5).float()
-                gen[:y0] = 1; gen[y1:] = 1; gen[:, :x0] = 1; gen[:, x1:] = 1
+                gen[:y0] = 1
+                gen[y1:] = 1
+                gen[:, :x0] = 1
+                gen[:, x1:] = 1
                 inner = None
             else:
                 if tuple(m.shape) != (sh, sw):

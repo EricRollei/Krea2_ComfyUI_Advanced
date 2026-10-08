@@ -38,10 +38,10 @@ def load_pack():
 
 def synthetic_depth(n):
     yy, xx = np.mgrid[0:n, 0:n].astype(np.float32) / n
-    d = 0.15 + 0.6 * np.clip((yy - 0.35) / 0.65, 0, 1)        # floor: far top, near bottom
-    d[yy < 0.35] = 0.08                                          # back wall
-    cx, cy, r = 0.62, 0.55, 0.17                                 # sphere
-    rr = ((xx - cx) ** 2 + (yy - cy) ** 2) / r ** 2
+    d = 0.15 + 0.6 * np.clip((yy - 0.35) / 0.65, 0, 1)  # floor: far top, near bottom
+    d[yy < 0.35] = 0.08  # back wall
+    cx, cy, r = 0.62, 0.55, 0.17  # sphere
+    rr = ((xx - cx) ** 2 + (yy - cy) ** 2) / r**2
     sph = rr < 1
     d[sph] = 0.75 + 0.25 * np.sqrt(1 - rr[sph])
     box = (xx > 0.14) & (xx < 0.38) & (yy > 0.42) & (yy < 0.74)  # box, front face
@@ -51,7 +51,10 @@ def synthetic_depth(n):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--lora", default=r"L:/Models/loras/Krea2/control/krea2_depth_control_lora_patil.safetensors")
+    ap.add_argument(
+        "--lora",
+        default=r"L:/Models/loras/Krea2/control/krea2_depth_control_lora_patil.safetensors",
+    )
     ap.add_argument("--base", default=r"H:/Training/Krea-2-Turbo")
     ap.add_argument("--out", default=r"A:/ai-tools/scratch/control_test")
     ap.add_argument("--size", type=int, default=1024)
@@ -64,28 +67,49 @@ def main():
     from PIL import Image
 
     t0 = time.perf_counter()
-    pipe = Krea2Pipeline.from_pretrained(a.base, torch_dtype=torch.bfloat16).to("cuda:0")
-    import importlib as _il; _cp = _il.import_module(C.__name__.rsplit('.', 1)[0] + '._compat'); _cp.apply_attention_backend(pipe.transformer, os.environ.get('K2_ATTN', 'sdpa'), log=print)
-    print(f"pipeline loaded in {time.perf_counter() - t0:.0f}s on {torch.cuda.get_device_name(0)}")
+    pipe = Krea2Pipeline.from_pretrained(a.base, torch_dtype=torch.bfloat16).to(
+        "cuda:0"
+    )
+    import importlib as _il
+
+    _cp = _il.import_module(C.__name__.rsplit(".", 1)[0] + "._compat")
+    _cp.apply_attention_backend(
+        pipe.transformer, os.environ.get("K2_ATTN", "sdpa"), log=print
+    )
+    print(
+        f"pipeline loaded in {time.perf_counter() - t0:.0f}s on {torch.cuda.get_device_name(0)}"
+    )
 
     depth = synthetic_depth(a.size)
     img = torch.from_numpy(depth)[None, :, :, None].repeat(1, 1, 1, 3)
     img = C.preprocess_control_image(img, "grayscale", "per_image_minmax", False)
-    prompt = ("a glossy red ceramic sphere and a weathered wooden crate on a stone floor in a dim "
-              "vaulted hall, soft window light, photograph")
+    prompt = (
+        "a glossy red ceramic sphere and a weathered wooden crate on a stone floor in a dim "
+        "vaulted hall, soft window light, photograph"
+    )
 
     def render():
         g = torch.Generator("cuda:0").manual_seed(a.seed)
-        return pipe(prompt=prompt, height=a.size, width=a.size, num_inference_steps=8,
-                    guidance_scale=0.0, generator=g).images[0]
+        return pipe(
+            prompt=prompt,
+            height=a.size,
+            width=a.size,
+            num_inference_steps=8,
+            guidance_scale=0.0,
+            generator=g,
+        ).images[0]
 
     base = render()
-    rt = C.ControlRuntime(pipe, {"path": a.lora, "image": img, "s1": a.strength, "s2": 0, "s3": 0})
+    rt = C.ControlRuntime(
+        pipe, {"path": a.lora, "image": img, "s1": a.strength, "s2": 0, "s3": 0}
+    )
     rt.install()
     try:
         t0 = time.perf_counter()
         ctrl = render()
-        print(f"controlled render {time.perf_counter() - t0:.1f}s, control calls {rt.n_ctrl_calls}")
+        print(
+            f"controlled render {time.perf_counter() - t0:.1f}s, control calls {rt.n_ctrl_calls}"
+        )
     finally:
         rt.remove()
     again = render()
@@ -98,7 +122,9 @@ def main():
         strip.paste(im.resize((a.size, a.size)), (i * a.size, 0))
     p = os.path.join(a.out, f"control_strip_s{a.strength}_seed{a.seed}.png")
     strip.save(p)
-    strip.resize((a.size * 3 // 2, a.size // 2)).save(p.replace(".png", "_small.jpg"), quality=90)
+    strip.resize((a.size * 3 // 2, a.size // 2)).save(
+        p.replace(".png", "_small.jpg"), quality=90
+    )
     print(f"saved {p}")
     print("RESULT", "PASS" if same and rt.n_ctrl_calls > 0 else "CHECK")
 

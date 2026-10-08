@@ -39,8 +39,11 @@ def load_pack():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("refs", nargs="+")
-    ap.add_argument("--prompt", default="an old lighthouse keeper standing on a rocky coast at dusk, "
-                                        "waves breaking, a lighthouse behind him")
+    ap.add_argument(
+        "--prompt",
+        default="an old lighthouse keeper standing on a rocky coast at dusk, "
+        "waves breaking, a lighthouse behind him",
+    )
     ap.add_argument("--base", default=r"H:/Training/Krea-2-Turbo")
     ap.add_argument("--out", default=r"A:/ai-tools/scratch/style_test")
     ap.add_argument("--size", type=int, default=1024)
@@ -54,14 +57,25 @@ def main():
     from PIL import Image
 
     t0 = time.perf_counter()
-    pipe = Krea2Pipeline.from_pretrained(a.base, torch_dtype=torch.bfloat16).to("cuda:0")
-    print(f"pipeline loaded {time.perf_counter() - t0:.0f}s on {torch.cuda.get_device_name(0)}", flush=True)
+    pipe = Krea2Pipeline.from_pretrained(a.base, torch_dtype=torch.bfloat16).to(
+        "cuda:0"
+    )
+    print(
+        f"pipeline loaded {time.perf_counter() - t0:.0f}s on {torch.cuda.get_device_name(0)}",
+        flush=True,
+    )
 
     def render():
         g = torch.Generator("cuda:0").manual_seed(a.seed)
         t = time.perf_counter()
-        im = pipe(prompt=a.prompt, height=a.size, width=a.size, num_inference_steps=a.steps,
-                  guidance_scale=0.0, generator=g).images[0]
+        im = pipe(
+            prompt=a.prompt,
+            height=a.size,
+            width=a.size,
+            num_inference_steps=a.steps,
+            guidance_scale=0.0,
+            generator=g,
+        ).images[0]
         return im, time.perf_counter() - t
 
     def bundle(img, strength):
@@ -71,7 +85,7 @@ def main():
         p["trajectory_steps"] = a.steps
         return {"image": img, "params": p, "s1": 1.0, "s2": 0.0, "s3": 0.0}
 
-    render()                                   # warm-up (kernels / allocator)
+    render()  # warm-up (kernels / allocator)
     base, tb = render()
     print(f"baseline {tb:.1f}s", flush=True)
 
@@ -97,7 +111,10 @@ def main():
             st, ts = render()
         finally:
             rt.remove()
-        print(f"{os.path.basename(path)}: styled {ts:.1f}s (x{ts / tb:.2f} baseline)", flush=True)
+        print(
+            f"{os.path.basename(path)}: styled {ts:.1f}s (x{ts / tb:.2f} baseline)",
+            flush=True,
+        )
         rows.append((path, st))
 
     after, _ = render()
@@ -112,10 +129,16 @@ def main():
         grid.paste(ref_im, ((n - ref_im.width) // 2, r * n + (n - ref_im.height) // 2))
         grid.paste(base, (n, r * n))
         grid.paste(st, (2 * n, r * n))
-        st.save(os.path.join(a.out, f"styled_{os.path.splitext(os.path.basename(path))[0]}.png"))
+        st.save(
+            os.path.join(
+                a.out, f"styled_{os.path.splitext(os.path.basename(path))[0]}.png"
+            )
+        )
     gp = os.path.join(a.out, f"style_grid_{a.trajectory}.png")
     grid.save(gp)
-    grid.resize((grid.width // 4, grid.height // 4)).save(gp.replace(".png", "_small.jpg"), quality=85)
+    grid.resize((grid.width // 4, grid.height // 4)).save(
+        gp.replace(".png", "_small.jpg"), quality=85
+    )
     print(f"saved {gp}")
     print("RESULT", "PASS" if same0 and same_after else "CHECK")
 

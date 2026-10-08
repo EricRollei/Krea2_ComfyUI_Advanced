@@ -27,39 +27,55 @@ from PIL import Image
 PACK = r"A:\Comfy25\ComfyUI_windows_portable\ComfyUI\custom_nodes\Eric_Krea2"
 OUT = r"A:\ai-tools\scratch\native_quant_test"
 TURBO = r"H:\Training\Krea-2-Turbo"
-PROMPT = ("an old lighthouse keeper standing on a rocky coast at dusk, waves breaking, a lighthouse "
-          "behind him, wet stones and tide pools in the foreground")
+PROMPT = (
+    "an old lighthouse keeper standing on a rocky coast at dusk, waves breaking, a lighthouse "
+    "behind him, wet stones and tide pools in the foreground"
+)
 SIZES = {"1mp": (1024, 1024), "3mp": (2048, 1536)}
 
 
 def load_pack(nq_path):
     sys.path.insert(0, os.path.abspath(os.path.join(PACK, "..", "..")))
-    pkg = types.ModuleType("k2pack"); pkg.__path__ = [PACK]; sys.modules["k2pack"] = pkg
+    pkg = types.ModuleType("k2pack")
+    pkg.__path__ = [PACK]
+    sys.modules["k2pack"] = pkg
     spec = importlib.util.spec_from_file_location("k2pack._native_quant", nq_path)
-    NQ = importlib.util.module_from_spec(spec); sys.modules["k2pack._native_quant"] = NQ
+    NQ = importlib.util.module_from_spec(spec)
+    sys.modules["k2pack._native_quant"] = NQ
     spec.loader.exec_module(NQ)
-    return (NQ, importlib.import_module("k2pack._compat"), importlib.import_module("k2pack._lora_utils"))
+    return (
+        NQ,
+        importlib.import_module("k2pack._compat"),
+        importlib.import_module("k2pack._lora_utils"),
+    )
 
 
 def psnr(a, b):
-    a = np.asarray(a, dtype=np.float32); b = np.asarray(b, dtype=np.float32)
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
     m = float(((a - b) ** 2).mean())
-    return round(99.0 if m == 0 else 10 * np.log10(255 ** 2 / m), 2)
+    return round(99.0 if m == 0 else 10 * np.log10(255**2 / m), 2)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--nq", default=os.path.join(PACK, "_native_quant.py"))
     ap.add_argument("--formats", default="int8,int8_convrot,mxfp8,nvfp4,fp8")
-    ap.add_argument("--lora", default=r"L:\Models\loras\Krea2\art-style\2650650-Oil_Painting_-_Thomas_Gainsborough\3098462-Krea2_v1\3098462_tgainsborough_000001800.safetensors")
+    ap.add_argument(
+        "--lora",
+        default=r"L:\Models\loras\Krea2\art-style\2650650-Oil_Painting_-_Thomas_Gainsborough\3098462-Krea2_v1\3098462_tgainsborough_000001800.safetensors",
+    )
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     NQ, CP, LU = load_pack(a.nq)
     from diffusers import Krea2Pipeline
+
     res = {"gpu": torch.cuda.get_device_name(0)}
 
     def fresh():
-        p = Krea2Pipeline.from_pretrained(TURBO, torch_dtype=torch.bfloat16).to("cuda:0")
+        p = Krea2Pipeline.from_pretrained(TURBO, torch_dtype=torch.bfloat16).to(
+            "cuda:0"
+        )
         CP.apply_attention_backend(p.transformer, "auto", log=lambda *_: None)
         return p
 
@@ -68,11 +84,21 @@ def main():
         times = []
 
         def cb(_p, i, _t, kw):
-            torch.cuda.synchronize(); times.append(time.perf_counter()); return kw
+            torch.cuda.synchronize()
+            times.append(time.perf_counter())
+            return kw
+
         g = torch.Generator("cpu").manual_seed(11)
         torch.cuda.reset_peak_memory_stats()
-        im = pipe(prompt=PROMPT, width=w, height=h, num_inference_steps=8, guidance_scale=0.0,
-                  generator=g, callback_on_step_end=cb).images[0]
+        im = pipe(
+            prompt=PROMPT,
+            width=w,
+            height=h,
+            num_inference_steps=8,
+            guidance_scale=0.0,
+            generator=g,
+            callback_on_step_end=cb,
+        ).images[0]
         im.save(os.path.join(OUT, f"{tag}_{size}.png"))
         st = [times[i + 1] - times[i] for i in range(len(times) - 1)]
         sps = sorted(st)[len(st) // 2] if st else float("nan")
@@ -98,14 +124,18 @@ def main():
                 entry[size]["psnr_vs_bf16"] = psnr(im, ref[size])
         # PEFT LoRA check at 1 MP
         try:
-            LU.load_lora_with_key_fix(pipe, a.lora, "nqtest", log_prefix="[nq-LoRA]", weight=1.0)
+            LU.load_lora_with_key_fix(
+                pipe, a.lora, "nqtest", log_prefix="[nq-LoRA]", weight=1.0
+            )
             iml, _, _ = render(pipe, "1mp", f"{fmt}_lora")
             if fmt == "bf16":
                 ref["lora"] = iml
                 entry["lora_effect_psnr_vs_nolora"] = psnr(iml, ref["1mp"])
             else:
                 entry["lora_psnr_vs_bf16lora"] = psnr(iml, ref["lora"])
-                entry["lora_effect_psnr_vs_nolora"] = psnr(iml, Image.open(os.path.join(OUT, f"{fmt}_1mp.png")))
+                entry["lora_effect_psnr_vs_nolora"] = psnr(
+                    iml, Image.open(os.path.join(OUT, f"{fmt}_1mp.png"))
+                )
         except Exception as e:
             entry["lora_error"] = f"{type(e).__name__}: {str(e)[:200]}"
         res[fmt] = entry
@@ -117,7 +147,9 @@ def main():
         e = res[fmt]
         for size in SIZES:
             if size in e and size in b:
-                e[size]["speedup"] = round(b[size]["s_per_step"] / e[size]["s_per_step"], 2)
+                e[size]["speedup"] = round(
+                    b[size]["s_per_step"] / e[size]["s_per_step"], 2
+                )
     json.dump(res, open(os.path.join(OUT, "native_quant_results.json"), "w"), indent=1)
     print("SUMMARY", json.dumps(res, indent=1))
     print("DONE", flush=True)

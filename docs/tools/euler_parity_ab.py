@@ -48,6 +48,7 @@ def find_base_from_sweeps():
     # repo = .../ComfyUI/custom_nodes/Eric_Krea2 -> output is .../ComfyUI/output
     out = os.path.abspath(os.path.join(REPO, "..", "..", "output", "sweeps"))
     from PIL import Image
+
     for d in sorted(glob.glob(os.path.join(out, "*")), reverse=True):
         for f in sorted(glob.glob(os.path.join(d, "cell_*.png"))):
             try:
@@ -63,8 +64,11 @@ def find_base_from_sweeps():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default=None, help="diffusers Krea2 pipeline folder")
-    ap.add_argument("--prompt", default="a lighthouse on a rocky coast at golden hour, "
-                                        "crashing waves, dramatic clouds")
+    ap.add_argument(
+        "--prompt",
+        default="a lighthouse on a rocky coast at golden hour, "
+        "crashing waves, dramatic clouds",
+    )
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--mp", type=float, default=1.0)
     ap.add_argument("--steps", type=int, default=20)
@@ -86,13 +90,17 @@ def main():
     # geometry for args.mp at 1:1
     side = int(round((args.mp * 1_000_000) ** 0.5 / 16)) * 16
     H = W = side
-    print(f"[parity] {W}x{H}, steps {args.start}->{args.steps} of {args.steps}, "
-          f"mu fixed 1.15, guidance 0 (single-cond - guidance formula already "
-          f"verified identical; keeping it off halves eval count)")
+    print(
+        f"[parity] {W}x{H}, steps {args.start}->{args.steps} of {args.steps}, "
+        f"mu fixed 1.15, guidance 0 (single-cond - guidance formula already "
+        f"verified identical; keeping it off halves eval count)"
+    )
 
-    emb, mask = pipe.encode_prompt(prompt=args.prompt, device=dev, num_images_per_prompt=1)
+    emb, mask = pipe.encode_prompt(
+        prompt=args.prompt, device=dev, num_images_per_prompt=1
+    )
     dtype = emb.dtype
-    num_ch = pipe.transformer.config.in_channels // (pipe.patch_size ** 2)
+    num_ch = pipe.transformer.config.in_channels // (pipe.patch_size**2)
     g0 = torch.Generator(device=dev).manual_seed(args.seed)
     x0_lat = pipe.prepare_latents(1, num_ch, H, W, dtype, dev, g0, None)
     grid_h = H // (pipe.vae_scale_factor * pipe.patch_size)
@@ -101,10 +109,15 @@ def main():
 
     def call_model(lat, sigma):
         ts = sigma.to(dtype).expand(lat.shape[0])
-        return pipe.transformer(hidden_states=lat.to(dtype), encoder_hidden_states=emb,
-                                timestep=ts, position_ids=pos,
-                                encoder_attention_mask=mask, attention_kwargs=None,
-                                return_dict=False)[0]
+        return pipe.transformer(
+            hidden_states=lat.to(dtype),
+            encoder_hidden_states=emb,
+            timestep=ts,
+            position_ids=pos,
+            encoder_attention_mask=mask,
+            attention_kwargs=None,
+            return_dict=False,
+        )[0]
 
     # one shared "stage output" to refine: quick 8-step euler full pass
     raw8 = np.linspace(1.0, 1.0 / 8, 8).tolist()
@@ -121,7 +134,7 @@ def main():
     rawN = np.linspace(1.0, 1.0 / args.steps, args.steps).tolist()
     pipe.scheduler.set_timesteps(sigmas=rawN, device=dev, mu=1.15)
     sigN = pipe.scheduler.sigmas.to(torch.float32)
-    window = sigN[args.start:].clone()
+    window = sigN[args.start :].clone()
     s0 = window[0]
     gn = torch.Generator(device=dev).manual_seed(args.seed + 1)
     noise = torch.randn(clean.shape, device=dev, dtype=torch.float32, generator=gn)
@@ -138,13 +151,19 @@ def main():
         pipe.scheduler.set_timesteps(sigmas=rawN, device=dev, mu=1.15)
         pipe.scheduler.set_begin_index(args.start)
         latA = noised.to(torch.bfloat16)
-        tsteps = pipe.scheduler.timesteps[args.start:]
+        tsteps = pipe.scheduler.timesteps[args.start :]
         for t in tsteps:
-            v = pipe.transformer(hidden_states=latA, encoder_hidden_states=emb,
-                                 timestep=(t / pipe.scheduler.config.num_train_timesteps)
-                                 .expand(latA.shape[0]).to(latA.dtype),
-                                 position_ids=pos, encoder_attention_mask=mask,
-                                 attention_kwargs=None, return_dict=False)[0]
+            v = pipe.transformer(
+                hidden_states=latA,
+                encoder_hidden_states=emb,
+                timestep=(t / pipe.scheduler.config.num_train_timesteps)
+                .expand(latA.shape[0])
+                .to(latA.dtype),
+                position_ids=pos,
+                encoder_attention_mask=mask,
+                attention_kwargs=None,
+                return_dict=False,
+            )[0]
             latA = pipe.scheduler.step(v, t, latA, return_dict=False)[0]
         results["A_pipe_bf16"] = latA.to(torch.float32)
 
@@ -152,15 +171,23 @@ def main():
         pipe.scheduler.set_timesteps(sigmas=rawN, device=dev, mu=1.15)
         pipe.scheduler.set_begin_index(args.start)
         gp = torch.Generator(device=dev).manual_seed(args.seed + 99)
-        latP = (noised + 1e-3 * torch.randn(noised.shape, device=dev,
-                                            dtype=torch.float32, generator=gp)
-                ).to(torch.bfloat16)
+        latP = (
+            noised
+            + 1e-3
+            * torch.randn(noised.shape, device=dev, dtype=torch.float32, generator=gp)
+        ).to(torch.bfloat16)
         for t in tsteps:
-            v = pipe.transformer(hidden_states=latP, encoder_hidden_states=emb,
-                                 timestep=(t / pipe.scheduler.config.num_train_timesteps)
-                                 .expand(latP.shape[0]).to(latP.dtype),
-                                 position_ids=pos, encoder_attention_mask=mask,
-                                 attention_kwargs=None, return_dict=False)[0]
+            v = pipe.transformer(
+                hidden_states=latP,
+                encoder_hidden_states=emb,
+                timestep=(t / pipe.scheduler.config.num_train_timesteps)
+                .expand(latP.shape[0])
+                .to(latP.dtype),
+                position_ids=pos,
+                encoder_attention_mask=mask,
+                attention_kwargs=None,
+                return_dict=False,
+            )[0]
             latP = pipe.scheduler.step(v, t, latP, return_dict=False)[0]
         results["A2_chaos_control"] = latP.to(torch.float32)
 
@@ -170,7 +197,8 @@ def main():
             return xx.to(dtype) - sigma.to(dtype) * v  # x0 form, as in the node
 
         results["B_solver_fp32"] = rs.rk_explicit_sample(
-            denoise_fn, noised.clone(), window.clone(), tableau="euler", eta=0.0)
+            denoise_fn, noised.clone(), window.clone(), tableau="euler", eta=0.0
+        )
 
         # B2: solver formulation, bf16-requantized accumulator each step
         latB2 = noised.clone()
@@ -185,41 +213,51 @@ def main():
     keys = list(results.keys())
     denom = results["A_pipe_bf16"].abs().mean()
     for i, ka in enumerate(keys):
-        for kb in keys[i + 1:]:
+        for kb in keys[i + 1 :]:
             d = (results[ka] - results[kb]).abs()
-            print(f"  {ka:20s} vs {kb:20s} max {d.max().item():.6f}  "
-                  f"rel {(d.mean() / denom).item():.6f}")
-    print("\n[parity] verdict guide: if A2_chaos_control sits at the SAME rel "
-          "distance from A as the solver arms (~all pairs similar), the gap is "
-          "pure chaos amplification of rounding noise - formulation exonerated. "
-          "If A-vs-A2 is MUCH smaller than A-vs-B, a systematic difference is "
-          "real - report the numbers.")
+            print(
+                f"  {ka:20s} vs {kb:20s} max {d.max().item():.6f}  "
+                f"rel {(d.mean() / denom).item():.6f}"
+            )
+    print(
+        "\n[parity] verdict guide: if A2_chaos_control sits at the SAME rel "
+        "distance from A as the solver arms (~all pairs similar), the gap is "
+        "pure chaos amplification of rounding noise - formulation exonerated. "
+        "If A-vs-A2 is MUCH smaller than A-vs-B, a systematic difference is "
+        "real - report the numbers."
+    )
 
     outdir = os.path.join(REPO, "docs", "tools", "euler_parity_out")
     os.makedirs(outdir, exist_ok=True)
     from PIL import Image
+
     for k, v in results.items():
         # Mirror of Krea2Pipeline.__call__'s decode block (Qwen image VAE:
         # per-channel latents_mean/std denorm, 5D (B,C,T,H,W), take frame 0).
         try:
             lat_un = pipe._unpack_latents(v.to(dtype), H, W)
             lat_un = lat_un.to(pipe.vae.dtype)
-            lm = (torch.tensor(pipe.vae.config.latents_mean)
-                  .view(1, pipe.vae.config.z_dim, 1, 1, 1)
-                  .to(lat_un.device, lat_un.dtype))
+            lm = (
+                torch.tensor(pipe.vae.config.latents_mean)
+                .view(1, pipe.vae.config.z_dim, 1, 1, 1)
+                .to(lat_un.device, lat_un.dtype)
+            )
             ls = 1.0 / torch.tensor(pipe.vae.config.latents_std).view(
-                1, pipe.vae.config.z_dim, 1, 1, 1).to(lat_un.device, lat_un.dtype)
+                1, pipe.vae.config.z_dim, 1, 1, 1
+            ).to(lat_un.device, lat_un.dtype)
             lat_un = lat_un / ls + lm
             img = pipe.vae.decode(lat_un, return_dict=False)[0][:, :, 0]
         except Exception as e:
             print(f"  (decode skipped for {k}: {e})")
             continue
-        arr = ((img[0].float().permute(1, 2, 0).cpu().numpy().clip(-1, 1) + 1) * 127.5)
+        arr = (img[0].float().permute(1, 2, 0).cpu().numpy().clip(-1, 1) + 1) * 127.5
         Image.fromarray(arr.astype("uint8")).save(os.path.join(outdir, f"{k}.png"))
         print(f"  wrote {k}.png")
-    print(f"\n[parity] interpretation: B2~=A (rel < ~1e-3) means the formulation is "
-          f"identical and any A-vs-B gap is purely the per-step bf16 dither the old "
-          f"path added. Large B2-vs-A gaps would mean a real formulation bug - report it.")
+    print(
+        f"\n[parity] interpretation: B2~=A (rel < ~1e-3) means the formulation is "
+        f"identical and any A-vs-B gap is purely the per-step bf16 dither the old "
+        f"path added. Large B2-vs-A gaps would mean a real formulation bug - report it."
+    )
 
 
 if __name__ == "__main__":
