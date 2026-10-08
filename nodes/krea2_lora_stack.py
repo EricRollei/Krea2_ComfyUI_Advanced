@@ -236,7 +236,9 @@ class EricKrea2MultiLoRA:
                   f"S1 {s1} / S2 {entry.get('weight_s2')} / S3 {entry.get('weight_s3')}")
 
         new_pipeline["lora_stack"] = stack
-        out_prompt = merge_triggers_into_prompt(prompt, triggers, add_triggers)
+        out_prompt = merge_triggers_into_prompt(
+            prompt, triggers, add_triggers,
+            pipe=pipeline.get("pipeline") if isinstance(pipeline, dict) else None)
         print(f"[EricKrea2-LoRA] Multi-LoRA queued {added} adapter(s) "
               f"(ephemeral={ephemeral}); stack depth {len(stack)}. "
               "Realized at generation by the Multi-Stage Ultra node.")

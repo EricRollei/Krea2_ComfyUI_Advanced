@@ -419,7 +419,9 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                                         trigs.append(t)
                         if trigs:
                             cur = str(ck.get("prompt", "") or "")
-                            merged = merge_triggers_into_prompt(cur, trigs, trig_mode)
+                            merged = merge_triggers_into_prompt(
+                                cur, trigs, trig_mode,
+                                pipe=(ck.get("krea2_pipeline") or {}).get("pipeline"))
                             if merged != cur:
                                 ck["prompt"] = merged
                                 ck["prompt_conditioning"] = None

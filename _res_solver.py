@@ -22,6 +22,20 @@ from __future__ import annotations
 import math
 import torch
 
+_UNSEEDED_WARNED = [False]
+
+
+def _unseeded_sampler(x):
+    """Fallback noise when the caller passed no noise_sampler: UNSEEDED randn_like (results
+    are not reproducible from the seed). Warns once per process when actually used."""
+    def _ns(s, sn):
+        if not _UNSEEDED_WARNED[0]:
+            _UNSEEDED_WARNED[0] = True
+            print("[EricKrea2-RES] WARNING: sampler drew UNSEEDED noise (no noise_sampler "
+                  "passed) - this run is not reproducible from its seed")
+        return torch.randn_like(x)
+    return _ns
+
 
 # --------------------------------------------------------------------------------------
 # helpers (mirrors of ComfyUI k_diffusion utilities, kept local so we have no GPL import)
@@ -87,7 +101,7 @@ def res_multistep_sample(
         Final latent (the x0 prediction at the terminal step).
     """
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
 
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
@@ -162,7 +176,7 @@ def res_2s_sample(
     Args mirror res_multistep_sample. c2=0.5 is the midpoint (RES4LYF default).
     """
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
 
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
@@ -277,7 +291,7 @@ def deis_sample(
     Args mirror res_multistep_sample; max_order in {3, 4} for deis_3m / deis_4m.
     """
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
 
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
@@ -346,7 +360,7 @@ def abnorsett_sample(denoise_fn, x, sigmas, order=4, eta=0.0, s_noise=1.0,
     1 model eval/step; order ramps 1 -> `order` as history accrues; eta =
     ancestral SDE churn as in the sibling samplers."""
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
     order = max(1, int(order))
@@ -398,7 +412,7 @@ def lawson4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
     simplicity and the strongest noise robustness in the package.
     """
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
     for i in range(n):
@@ -441,7 +455,7 @@ def etdrk4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
         b1 = phi1 - 3 phi2 + 4 phi3 ; b2 = 2 phi2 - 4 phi3 ; b4 = -phi2 + 4 phi3
     """
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
     for i in range(n):
@@ -497,7 +511,7 @@ def er_sde_sample(denoise_fn, x, sigmas, s_noise=1.0, noise_sampler=None,
     amplification 0.048 on EVERY schedule incl. linear_quadratic -
     schedule-proof at 1 model eval/step."""
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
 
@@ -575,7 +589,7 @@ def lcm_sample(
     fine detail the trajectory carried, so it belongs in post-upscale refine
     windows, not in Stage 1."""
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
 
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1
@@ -701,7 +715,7 @@ def rk_explicit_sample(
     n_stages = len(c)
 
     if noise_sampler is None:
-        noise_sampler = lambda s, sn: torch.randn_like(x)
+        noise_sampler = _unseeded_sampler(x)
 
     sigmas = sigmas.to(device=x.device, dtype=torch.float32)
     n = sigmas.shape[0] - 1

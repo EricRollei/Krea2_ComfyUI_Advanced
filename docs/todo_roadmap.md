@@ -153,3 +153,30 @@ loader logs the referrers if a released pipeline still survives (self-diagnosis)
   images / reframing), no visible artefacts at 1:1. Kernel-only 1.7x shrinks because MLP,
   norms, RoPE and the QKV/out projections dominate below ~8 MP. (c) still open: _split_attn
   via sage `return_lse=True` - worth it mainly for 8 MP edit runs.
+
+## Reproducibility + small fixes (2026-10-08, after v1.6.0 commit)
+- **er_sde was not seed-reproducible - FIXED.** Ultra built its seeded noise_sampler only when
+  eta > 0; er_sde churns every step regardless of eta, so at eta 0 it drew UNSEEDED randn_like
+  (different image every run at a fixed seed). Now er_sde always gets the seeded sampler.
+  _res_solver's unseeded fallback now warns once when used.
+- **LoRA search** works without the LoRA Catalog (tested: 568 LoRAs, filename/folder/trigger
+  search); note now reads "LoRA Catalog not installed (optional)" when none is configured.
+- **Mask-safe attention kept** after Eric's A/B (no quality difference; fixes the bottom edge).
+  Observed: with the fix, prompt/LoRA concepts express more strongly (e.g. Dali-style figures
+  more often nude) - consistent with the old path diluting the prompt with ~400 padding keys.
+  Diagnostic switch ERIC_KREA2_MASK_SAFE=0 (env, read at startup) remains for future A/Bs.
+- **Launcher review** (hunyuan_speed_launcher.bat): dead TORCH_CUDNN_* / XFORMERS_DISABLED env
+  vars removed, --fast autotune added, CUDA_DEVICE_ORDER=FASTEST_FIRST explicit,
+  expandable_segments unsupported on Windows (left off). Backups in docs/backup.
+
+## Prompt token budget (2026-10-08)
+- Ultra prints `prompt: N/507 tokens` every run (exact, pipeline tokenizer/template) and warns with
+  the dropped words on overflow.
+- Trigger merge (_trigger_words.merge_triggers_into_prompt, pipe=...) is budget-aware via
+  _prompt_budget.py: shortens the prompt body (drop sentences before the last, else cut the end)
+  so appended/prepended triggers survive. Whole-word trigger dedup (rust != rusted).
+- video_prompter Platform Prompt Rewriter: length_guard (retry+trim / trim / off, appended);
+  core/profiles/token_budget.py (Qwen tokenizer from local files, else estimate); target =
+  limit - 8% headroom (Krea 2: 471 of 512). Backups: video_prompter/dev/backup_2026-10-08_token_budget.
+- Not covered: video_prompter LoRA Suggester `prompt_with_triggers` (pre-rewrite merge, substring
+  dedup) and the other expander nodes - they use their own length rules.

@@ -139,10 +139,43 @@ def _try_set_backend(transformer, cand, log=print) -> bool:
         return False
 
 
+def mask_safe_disabled() -> bool:
+    """DIAGNOSTIC (2026-10-08): ERIC_KREA2_MASK_SAFE=0 in the environment before ComfyUI starts
+    turns the mask-safe fix OFF (old flash_varlen behaviour) for A/B comparisons."""
+    import os
+    return os.environ.get("ERIC_KREA2_MASK_SAFE", "").strip().lower() in ("0", "off", "false", "no")
+
+
+def uninstall_mask_safe_attention(transformer, log=print) -> int:
+    """Put the stock diffusers Krea2AttnProcessor back on every module that carries ours."""
+    from diffusers.models.transformers.transformer_krea2 import Krea2AttnProcessor
+    n = 0
+    for mod in transformer.modules():
+        proc = getattr(mod, "processor", None)
+        if proc is None or not getattr(proc, "_eric_mask_safe", False):
+            continue
+        new = Krea2AttnProcessor()
+        new._attention_backend = getattr(proc, "_attention_backend", None)
+        new._parallel_config = getattr(proc, "_parallel_config", None)
+        mod.processor = new
+        n += 1
+    return n
+
+
 def _finish(transformer, log):
     """Install the mask-safe processor after the backend is chosen. It copies the backend
     from the stock processor it replaces; later set_attention_backend() calls reach it too
     (diffusers sets _attention_backend on every processor that has the attribute)."""
+    if mask_safe_disabled():
+        try:
+            n = uninstall_mask_safe_attention(transformer, log=log)
+        except Exception as e:
+            n = f"? ({type(e).__name__}: {e})"
+        if log is not None:
+            log("[attn] *** DIAGNOSTIC: ERIC_KREA2_MASK_SAFE=0 - mask-safe attention is OFF "
+                f"(stock processor, restored on {n} module(s)). flash_varlen attends to text "
+                "padding and drops the bottom image rows - use crop_bottom. A/B only. ***")
+        return
     try:
         install_mask_safe_attention(transformer, log=log)
     except Exception as e:  # never break loading over the fix

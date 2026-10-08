@@ -1284,7 +1284,22 @@ cell's PNG chunk records what actually applied.
   rows (the bottom band `crop_bottom` was hiding, plus weaker prompt adherence). All Krea 2
   attention now drops padded keys explicitly before the kernel - same speed as before, matches
   SDPA. Existing seeds render slightly differently (correctly to the edge); `crop_bottom`
-  should no longer be needed.
+  is no longer needed - it now defaults to 0 and `crop_overgen` to off, and the shipped Ultra
+  presets were reset to match (saved workflows keep whatever they stored).
+  Side effect worth knowing: the old path diluted every prompt with ~400 padding tokens, so the
+  prompt (and text-side LoRAs) now act at full strength - same image quality, noticeably
+  stronger prompt / style adherence (e.g. a style that implies nudes now gets them more often).
+  For A/B comparisons, `set ERIC_KREA2_MASK_SAFE=0` before ComfyUI starts restores the old
+  behaviour (console prints a DIAGNOSTIC line; use `crop_bottom`).
+- **Prompt length: 507 tokens max.** Krea 2 encodes a fixed 512-token text budget (5 go to the
+  chat template); diffusers cuts anything longer **silently**. The Ultra now prints
+  `prompt: N/507 tokens` every run and a warning with the dropped words when a prompt
+  overflows - keep LLM-expanded prompts under ~380 English words. (Vision Prompt checks its own
+  budget and errors instead.)
+  **Trigger words are protected:** with `add_triggers` on (LoRA / Multi-LoRA Stack, and sweep cells),
+  the merge counts tokens and, when prompt + triggers would overflow, shortens the prompt body
+  (sentences just before the last one go first) so the triggers are never the part that is cut.
+  A trigger only counts as already present on a whole-word match (`rust` is not in `rusted`).
 - **VRAM on model switches (Oct 2026).** LoRA / LoRA-stack / Unload-LoRA outputs and older
   loader outputs kept in ComfyUI's cache used to pin the previous model, and a reference cycle
   kept a released pipeline alive until the next model was already loading - both caused

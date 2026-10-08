@@ -128,6 +128,17 @@
       "fetched_at": "2026-10-05",
       "civitai_version_id": 3373614,
       "civitai_model_id": 2976533
+    },
+    "l:\\models\\loras\\krea2\\art-style\\715602-dovilio_brero_atlantis__sdxl_flux_qwen_z-image_\\3130357-krea_2\\3130357_atlan_k2.safetensors": {
+      "sig": "114367240|1784076157",
+      "trigger_words": [
+        "dovilioatlan"
+      ],
+      "name": "Dovilio Brero Atlantis (SDXL/FLUX/QWEN/Z-IMAGE) - KREA 2",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-08",
+      "civitai_version_id": 3130357,
+      "civitai_model_id": 715602
     }
   }
 }

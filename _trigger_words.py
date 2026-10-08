@@ -303,20 +303,22 @@ def get_trigger_words(lora_path: str, force: bool = False) -> list:
     return list(get_trigger_info(lora_path, force=force).get("trigger_words", []))
 
 
-def merge_triggers_into_prompt(prompt: str, triggers: list, mode: str) -> str:
+def merge_triggers_into_prompt(prompt: str, triggers: list, mode: str, pipe=None) -> str:
     """Combine trigger words with a prompt. ``mode``: off|prepend|append.
     Triggers already present in the prompt (case-insensitive) are not added
-    twice; returns the prompt unchanged for mode 'off' or no triggers."""
+    twice; returns the prompt unchanged for mode 'off' or no triggers.
+    With ``pipe`` (a Krea2Pipeline) the merge respects the 507-token prompt budget:
+    the prompt BODY is shortened so the triggers are never what the encoder cuts."""
     prompt = prompt or ""
     if mode == "off" or not triggers:
         return prompt
     low = prompt.lower()
-    missing = [t for t in triggers if t and t.lower() not in low]
+    # whole-word / whole-phrase match: a trigger "rust" is not already present in "rusted"
+    missing = [t for t in triggers if t and not re.search(r"(?<!\w)" + re.escape(t.lower()) + r"(?!\w)", low)]
     if not missing:
         return prompt
     tail = ", ".join(missing)
     if not prompt.strip():
         return tail
-    if mode == "prepend":
-        return f"{tail}, {prompt}"
-    return f"{prompt}, {tail}"
+    from ._prompt_budget import merge_within_budget
+    return merge_within_budget(prompt, tail, mode, pipe, log_prefix=_LOG)

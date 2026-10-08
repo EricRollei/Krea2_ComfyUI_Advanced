@@ -220,7 +220,9 @@ class EricKrea2ApplyLoRA:
                 triggers = get_trigger_words(lora_path, force=force_refetch)
             except Exception as e:
                 print(f"[EricKrea2-LoRA] trigger lookup failed (non-fatal): {e}")
-        out_prompt = merge_triggers_into_prompt(prompt, triggers, add_triggers)
+        out_prompt = merge_triggers_into_prompt(
+            prompt, triggers, add_triggers,
+            pipe=pipeline.get("pipeline") if isinstance(pipeline, dict) else None)
 
         wtxt = (f"all={strength}" if not per_stage_weights
                 else f"S1={weight_s1}, S2={weight_s2}, S3={weight_s3}")

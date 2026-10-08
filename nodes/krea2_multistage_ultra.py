@@ -453,7 +453,10 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
         return xin - sigma.to(dtype) * v          # velocity -> x0
 
     noise_sampler = None
-    if eta and eta > 0:
+    # er_sde injects noise EVERY step regardless of eta (eta is ignored by contract), so it
+    # always needs the seeded sampler - with eta 0 it used to fall back to the solver's
+    # unseeded randn_like and a fixed seed gave a different image every run (2026-10-08).
+    if (eta and eta > 0) or method == "er_sde":
         if noise_type and noise_type != "white":
             h_lat, w_lat = 2 * (int(height) // 16), 2 * (int(width) // 16)
             b = x.shape[0]
@@ -538,6 +541,31 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
     return out.to(dtype)
 
 
+def _report_prompt_tokens(pipe, prompt, max_sequence_length=512):
+    """Exact Krea2 prompt-token count (same template/tokenizer as the pipeline's
+    get_text_hidden_states). Budget = max_sequence_length - template suffix tokens (507);
+    diffusers truncates anything beyond it silently. Logs only; never raises. 2026-10-08."""
+    try:
+        tok = pipe.tokenizer
+        prefix = pipe.prompt_template_encode_prefix
+        start = int(pipe.prompt_template_encode_start_idx)
+        budget = int(max_sequence_length) - int(pipe.prompt_template_encode_num_suffix_tokens)
+        ids = tok(prefix + str(prompt), truncation=False).input_ids
+        n = len(ids) - start
+        if n <= budget:
+            print(f"[EricKrea2-MS] prompt: {n}/{budget} tokens")
+            return n
+        dropped = ids[start + budget:]
+        head = tok.decode(dropped[:24]).strip().replace("\n", " ")
+        print(f"[EricKrea2-MS] \u26a0 prompt: {n}/{budget} tokens - the last {n - budget} token(s) "
+              f"are TRUNCATED by the Krea 2 encoder (fixed 512-token budget). Dropped text "
+              f"starts: \"{head}{'...' if len(dropped) > 24 else ''}\"")
+        return n
+    except Exception as e:
+        print(f"[EricKrea2-MS] prompt token count unavailable ({type(e).__name__}: {e})")
+        return None
+
+
 class EricKrea2MultistageUltra:
     # PATH B (work in progress): exact copy of EricKrea2Multistage, kept separate so the
     # shipping node is never disturbed. This is the base onto which the RES multistep
@@ -617,11 +645,12 @@ class EricKrea2MultistageUltra:
                                "random_per_stage: S1 seeded, S2/S3 fresh random each run."}),
                 # framing / output prep (widget order only; crop applies to the FINAL stage)
                 "crop_bottom": ("INT", {"default": 0, "min": 0, "max": 96, "step": 2,
-                    "tooltip": "Crop N latent rows off the bottom of the FINAL executed stage to remove "
-                               "the boundary band the DiT re-forms on every denoise (1 latent row = 8 px "
-                               "at the final stage's resolution). 0 = off. Snapped to even (2x2 patch "
-                               "stride). Typical ~10-20 at final res; deeper S2/S3 sampling needs fewer."}),
-                "crop_overgen": ("BOOLEAN", {"default": True,
+                    "tooltip": "Crop N latent rows off the bottom of the FINAL executed stage (1 latent "
+                               "row = 8 px at the final stage's resolution). 0 = off (default). Not needed "
+                               "since the Oct 2026 mask-safe attention fix - the bottom band was a "
+                               "flash_varlen bug, not the model. Kept for old workflows / special cases. "
+                               "Snapped to even (2x2 patch stride)."}),
+                "crop_overgen": ("BOOLEAN", {"default": False,
                     "tooltip": "ON (recommended): the final stage makes disposable extra bottom rows "
                                "(S1 generates taller; S2/S3 pad the upscaled latent) so the band forms "
                                "in them and is trimmed - your target size/aspect is preserved and the "
@@ -1271,7 +1300,7 @@ class EricKrea2MultistageUltra:
                  aspect_ratio="5:4 landscape", s1_megapixels=3.00, width=0, height=0,
                  s1_steps=10, s1_cfg=1.9, s1_schedule="beta57", s1_sampler="res_2m", s1_noise="white",
                  init_latent=None, init_match_size=True, s1_start_step=0, s1_end_step=0,
-                 crop_bottom=0, crop_overgen=True,
+                 crop_bottom=0, crop_overgen=False,
                  upscale_to_stage2=3.0, s2_steps=20, s2_cfg=1.5, s2_start_step=7, s2_end_step=20,
                  s2_schedule="linear", s2_sampler="euler", s2_noise="white",
                  upscale_to_stage3=2.0, s3_steps=20, s3_cfg=1.3, s3_start_step=9, s3_end_step=20,
@@ -1325,6 +1354,8 @@ class EricKrea2MultistageUltra:
             _cond_override = (prompt_conditioning["embeds"], prompt_conditioning["mask"])
             print(f"[EricKrea2-MS] using precomputed prompt_conditioning {tuple(_cond_override[0].shape)} "
                   "instead of encoding 'prompt' as text (every stage).")
+        elif isinstance(prompt, str) and prompt.strip():
+            _report_prompt_tokens(pipe, prompt)
 
         # LoRA per-stage weights (no-op unless generate() realized a stack)
         def _lora_stage(idx):

@@ -119,6 +119,10 @@ def _jl(v):
 def _load_cards(cat):
     """{full-path key: card dict} from card_facets, or ({}, note)."""
     if not os.path.exists(cat):
+        if cat == _DEFAULT_CATALOG and not os.environ.get("ERIC_LORA_CATALOG"):
+            # nothing configured - the catalog is an optional companion tool
+            return {}, ("LoRA Catalog not installed (optional) - searching file names, "
+                        "folders and trigger words")
         return {}, f"LoRA Catalog not found at {cat}"
     try:
         con = sqlite3.connect(f"file:{cat}?mode=ro", uri=True, timeout=5)
