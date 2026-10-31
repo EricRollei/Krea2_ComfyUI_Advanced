@@ -3,7 +3,7 @@
 All notable changes to Eric_Krea2 are documented here. Format loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
-## 1.7.0
+## 1.7.0 - 2026-10-30
 
 ### Added - hybrid handoff, sweep sheets & trajectory probe
 - **New `Eric Krea2 Hybrid Handoff` node (`nodes/krea2_hybrid_handoff.py`)** -
@@ -29,8 +29,67 @@ All notable changes to Eric_Krea2 are documented here. Format loosely based on
   `_sampling_extras.py`; resolution solver and multistage Ultra nodes updated.
 - **Docs** - added `docs/SWEEPS.md`, `docs/sweep_lora_cheatsheet.md`, and
   `docs/spec_lora_stack_sweeps_2026-10-09.md`; README substantially rewritten.
+- **Prompt budget helper (`_prompt_budget.py`)** plus LoRA search/trigger tweaks
+  and Ultra preset/solver updates; dev-only `docs/tools` scripts untracked and an
+  E702 registry-scan compliance fix (post-1.6.0 housekeeping folded into 1.7.0).
 
-## 1.2.0
+## 1.6.0 - 2026-10-08
+
+### Added - Control-LoRA, style reference, inpaint/outpaint & edits
+- **Control-LoRA (`_control.py`)** - structural/control conditioning via
+  Control-LoRA adapters on the Krea 2 pipeline.
+- **Style reference (`_style_ref.py`)** - reference-image style transfer path,
+  with spec `docs/spec_style_transfer_2026-10-07.md`.
+- **Inpaint / outpaint (`_paint.py`)** - masked inpaint and canvas-extension
+  outpaint, with spec `docs/spec_inpaint_outpaint_2026-10-08.md`.
+- **Image edits + NAG / NegPiP negative guidance (`_edit_geom.py`,
+  `_edit_guidance.py`, `_edit_install.py`, `_edit_text.py`)** - geometry/text
+  edit operators and NAG/NegPiP-style negative guidance, with spec
+  `docs/spec_edits_2026-10-08.md`.
+- **Native quantized compute (`_native_quant.py`)** - run compute in native
+  quantized formats, with spec `docs/spec_native_quant_2026-10-08.md`.
+- **DeGrid (`_degrid.py`)** - grid/pattern artifact removal.
+- **LoRA search (`_lora_search.py`)** - search/catalog LoRA files from the nodes.
+- **Support modules** - split-attention (`_split_attn.py`), pipe handles
+  (`_pipe_handles.py`), and expanded compatibility shims (`_compat.py`); roadmap
+  added at `docs/todo_roadmap.md`.
+
+## 1.5.0 - 2026-08-15
+
+### Changed - sigmas/solver and multistage/sweep refinements
+- **ER-SDE solver additions (`_res_solver.py`)** and sigma-curve tweaks
+  (`_sigmas.py`), referencing `docs/tools/_comfy_er_sde_excerpt.txt`.
+- **Multistage Ultra and sweep refinements** - stability/quality tuning across
+  the multi-stage sampler and sweep node.
+
+## 1.4.2 - 2026-08-02
+
+### Added - sweep presets & preset UI
+- **Sweep presets (`sweep_presets.json`)** and **sigmas presets
+  (`sigmas_presets.json`)** with preset-dropdown UI updates (`krea2_presets.js`).
+
+### Changed
+- **Solver / sigmas refinements (`_res_solver.py`, `_sigmas.py`)** and component
+  loader tweaks; sweep node expanded (`nodes/krea2_sweep.py`).
+
+## 1.4.0 - 2026-07-26
+
+### Added - sweep system, component-loader dropdowns & provenance
+- **Sweep system (`_sweep_core.py`, `nodes/krea2_sweep.py`)** - grid/parameter
+  sweeps over generation settings, with specs
+  `docs/spec_sweep_system_2026-07-24.md`,
+  `docs/spec_sweep_system_2026-07-24_v2_final.md`,
+  `docs/spec_sweep_v2_lora_prompts_2026-07-25.md`, and dev notes
+  `docs/dev_notes_2026-07-24_sweep_system.md`.
+- **Component-loader model dropdowns** - `EricKrea2ComponentLoader` gains
+  folder-populated model/text-encoder/VAE dropdowns.
+- **Provenance / telemetry (`_telemetry.py`)** - generation provenance tracking.
+
+### Changed - hybrid solver improvements
+- **Hybrid solver work (`_res_solver.py`)** and multistage Ultra V1/V2
+  refinements; reference-latent edit path reworked (`_ref_latents.py`).
+
+## 1.2.0 - 2026-07-17
 
 ### Added - automatic LoRA trigger words
 - **New `_trigger_words.py` + `data/lora_triggers.json` cache** - looks up a
@@ -56,7 +115,7 @@ All notable changes to Eric_Krea2 are documented here. Format loosely based on
   ambiguous", making the whole fallback path unreachable. Replaced with explicit
   `None` checks.
 
-## Unreleased
+## 1.1.0 - 2026-07-15
 
 ### Added - reference-latent edit pathway (EXPERIMENTAL, untested on live model)
 - **New `Eric Krea2 Reference Latents (Edit)` node + `_ref_latents.py`** - diffusers
@@ -138,6 +197,8 @@ All notable changes to Eric_Krea2 are documented here. Format loosely based on
   all three stages. The image-recipe → preset bridge (`lora_list_to_slots`)
   now emits the per-stage keys from `weight_s1/s2/s3`.
 
+## 1.0.0 - Initial public release (2026-07-11)
+
 ### Added - INT8 ConvRot checkpoint support (component loader)
 - **INT8 / INT8-ConvRot dequantization** - the component loader's single-file
   paths (transformer and text encoder) now load native-ComfyUI INT8 checkpoints,
@@ -210,7 +271,7 @@ All notable changes to Eric_Krea2 are documented here. Format loosely based on
 - `upscale_to_stage2/3` tooltips now spell out that they are **area** (megapixel)
   factors and note exactly when a connected upscale VAE ignores or respects them.
 
-## 2026-07 - Multi-stage sampling, presets & img2img toolkit
+### Multi-stage sampling, presets & img2img toolkit (2026-07)
 
 A large development cycle that turned the pack from a text-to-image generator into
 a full production toolkit: img2img, a reusable preset/settings system, a shared
@@ -307,9 +368,8 @@ scheduler library, extra RES/DEIS samplers, and resolution/latent helpers.
 - DEIS with `eta > 0` uses the standard ancestral approximation (integrate the
   deterministic part to `sigma_down`, then inject `sigma_up` noise).
 
-## 2026-06 - Initial release
+### Foundation (2026-06)
 
-### Added
 - **`EricKrea2Loader`** - loads `Krea2Pipeline` (Raw or Turbo) via
   `from_pretrained`, auto-detects `is_distilled` from `model_index.json`, applies
   a selectable `attention_backend` (`auto`/`flash`/`sage`/`sdpa`, with safe
