@@ -26,6 +26,11 @@ stages S1/S2/S3) instead of a single strength + a mode toggle - set all three
 equal for a uniform weight, or shape them per stage (e.g. detail LoRA
 0 / 0.7 / 1.0, style LoRA 1.0 / 0.6 / 0.3).
 
+Word options (2026-10-20): some LoRAs are trained on alternatives (one keyword per colour grade, per style). The
+LoRA Catalog keeps them as named word options; the ``word_options`` field picks one per slot, one line each,
+``3: teal orange`` (slot 3 gets that option's words instead of its usual ones). The "Pick words" button fills
+the field from the catalog. Lines for empty / switched-off slots are ignored.
+
 Author: Eric Hiss (GitHub: EricRollei)
 """
 
@@ -34,7 +39,8 @@ import os
 
 from .._lora_utils import get_lora_list, get_lora_full_path
 from .._trigger_words import get_trigger_words, merge_triggers_into_prompt
-from .krea2_lora import _sanitize_adapter_name, _stack_settings
+from .krea2_lora import (TRIGGER_MODES, TRIGGER_TOOLTIP, _sanitize_adapter_name, _stack_settings, resolve_triggers,
+                         checkpoint_of, canon_trigger_mode)
 from .. import _settings
 
 
@@ -101,10 +107,9 @@ class EricKrea2MultiLoRA:
                        "Civitai, cached locally in Eric_Krea2/data/lora_triggers.json - only "
                        "the first lookup per file touches the network). Fills the "
                        "trigger_words output (combined, de-duplicated, slot order)."})
-        optional["add_triggers"] = (["off", "prepend", "append"], {"default": "off",
-            "tooltip": "Merge the combined trigger words of all enabled slots into the prompt "
-                       "passthrough output. off = prompt passes through unchanged. Triggers "
-                       "already present in the prompt are not duplicated."})
+        optional["add_triggers"] = (TRIGGER_MODES, {"default": "none",
+            "tooltip": TRIGGER_TOOLTIP + "\nApplies to every enabled slot; the words go into the 'prompt' "
+                       "output (connect your prompt to the prompt input)."})
         optional["force_refetch"] = ("BOOLEAN", {"default": False,
             "tooltip": "Bypass the local trigger cache and re-query Civitai for the enabled "
                        "slots this run. Leave OFF normally."})
@@ -117,11 +122,46 @@ class EricKrea2MultiLoRA:
             "tooltip": "Optional: LoRAs picked by the LoRA Suggester (video_prompter). They are added after "
                        "this panel's own slots with their per-stage weights; a file already in the stack is "
                        "not added twice. Their trigger words join the trigger merge."})
+        # Appended LAST 2026-10-20 (widget values are saved by position; the two sockets above take none).
+        optional["word_options"] = ("STRING", {"multiline": True, "default": "",
+            "tooltip": "Pick one of a LoRA's word options (LoRA Catalog card > Prompt words > Word options) per "
+                       "slot, one line each: '3: teal orange' (a name, its number, or the start of its name). "
+                       "That slot's words become the option's words, in every add_triggers mode except none; "
+                       "the trigger_words output carries them too. Use the 'Pick words' button to choose "
+                       "from a list. '3: random' = a different option every run. An amber dot left of a slot = its "
+                       "LoRA has word options and none is chosen (click it to pick). Empty = every slot uses its "
+                       "usual words."})
+        # Appended LAST 2026-10-29 (positional widget values).
+        optional["trigger_join"] = (["comma", "period"], {"default": "comma", "tooltip": "How the trigger words join the prompt (when add_triggers is on). comma: 'trigA, trigB, your prompt' (the behaviour before 2026-10-29). period: each LoRA's words become their own sentence - 'trigA. trigB. Your prompt' - the way many Civitai prompts start; it may stop a trigger being read as text to draw (being tested with the Sweep Plan trigger_joins axis)."})
         return {"required": {"pipeline": ("KREA2_PIPELINE",)}, "optional": optional}
+
+    @classmethod
+    def IS_CHANGED(cls, word_options="", **kwargs):
+        # '3: random' (2026-10-26) draws a new word option every queue, so never reuse the cached result then.
+        if any(ln.partition(":")[2].strip().lower() == "random" for ln in str(word_options or "").splitlines()):
+            return float("nan")
+        return ""
+
+    @staticmethod
+    def parse_word_options(text):
+        """'3: teal orange' lines -> {3: 'teal orange'}. Other lines are ignored (with a note)."""
+        out = {}
+        for ln in str(text or "").splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            slot, sep, option = ln.partition(":")
+            if sep and slot.strip().isdigit() and option.strip():
+                out[int(slot.strip())] = option.strip()
+            else:
+                print(f"[EricKrea2-LoRA] word_options: '{ln}' ignored (write 'slot: option', e.g. '3: teal orange')")
+        return out
 
     def apply(self, pipeline, ephemeral=True, lora_preset="custom",
               stack_enabled=True, fetch_triggers=True, add_triggers="off",
-              force_refetch=False, prompt="", suggestions=None, **kwargs):
+              force_refetch=False, prompt="", suggestions=None, word_options="", trigger_join="comma", **kwargs):
+        add_triggers = canon_trigger_mode(add_triggers)
+        slot_options = self.parse_word_options(word_options)
         if not stack_enabled:
             print("[EricKrea2-LoRA] Multi-LoRA stack is toggled OFF - passing pipeline through.")
             return (pipeline, _stack_settings(pipeline.get("lora_stack", [])),
@@ -146,6 +186,7 @@ class EricKrea2MultiLoRA:
         added = 0
         triggers = []          # combined across enabled slots, slot order, de-duped
         _seen_trig = set()
+        recipe_items = []      # recipe mode: every LoRA's words, merged once at the end (2026-10-16)
         for i in range(1, self.MAX_SLOTS + 1):
             name = kwargs.get(f"lora_{i}", "none")
             if not name or name == "none":
@@ -184,12 +225,44 @@ class EricKrea2MultiLoRA:
             })
             added += 1
 
+            # A word option for this slot (2026-10-20): its words replace the slot's usual ones.
+            if i in slot_options:
+                from .._catalog_lookup import find_option, word_options as _options_of
+                if str(slot_options[i]).strip().lower() == "random":     # 2026-10-26: new option each run
+                    import random as _random
+                    _all = _options_of(path)
+                    opt = _random.choice(_all) if _all else None
+                else:
+                    opt = find_option(path, slot_options[i])
+                if opt is not None:
+                    text = str(opt.get("text") or "").strip()
+                    print(f"[EricKrea2-LoRA] slot {i}: word option '{opt.get('name')}' -> '{text}'")
+                    stack[-1]["word_option"] = str(opt.get("name"))     # recorded in the image's LoRA metadata
+                    if text and add_triggers in ("recipe", "full"):
+                        recipe_items.append({"name": os.path.basename(path), "text": text, "weight": s1,
+                                             "source": f"word option {opt.get('name')}"})
+                    elif text and text.lower() not in _seen_trig:
+                        _seen_trig.add(text.lower())
+                        triggers.append(text)
+                    continue
+                have = [str(o.get("name")) for o in _options_of(path)]
+                print(f"[EricKrea2-LoRA] slot {i}: word option '{slot_options[i]}' not found for "
+                      f"{os.path.basename(path)} (" + ("has: " + ", ".join(have[:12]) if have else
+                                                       "no options on its card") + ") - usual words")
+
             # Trigger words for this ENABLED slot (cached lookup; network only
             # the first time a file is seen). Disabled/'none' slots never reach
             # this point, so their triggers are never emitted.
-            if fetch_triggers:
+            if fetch_triggers or add_triggers in ("catalog", "recipe", "full"):
                 try:
-                    for t in get_trigger_words(path, force=force_refetch):
+                    found, _merge, _source = resolve_triggers(path, add_triggers, fetch_triggers, force_refetch,
+                                                              checkpoint=checkpoint_of(pipeline))
+                    if add_triggers in ("recipe", "full"):
+                        if found:
+                            recipe_items.append({"name": os.path.basename(path), "text": found[0],
+                                                 "weight": s1, "source": _source})
+                        found = []
+                    for t in found:
                         k = t.lower()
                         if k not in _seen_trig:
                             _seen_trig.add(k)
@@ -228,17 +301,40 @@ class EricKrea2MultiLoRA:
                 "ephemeral": bool(ephemeral),
             })
             added += 1
-            for t in entry.get("triggers") or []:
+            if add_triggers in ("recipe", "full"):  # the catalog's words for this LoRA, like the panel slots
+                try:
+                    sugg, _m, _s = resolve_triggers(path, add_triggers, fetch_triggers, force_refetch,
+                                                    checkpoint=checkpoint_of(pipeline))
+                except Exception:
+                    sugg, _s = (entry.get("triggers") or [])[:1], ""
+                if sugg:
+                    recipe_items.append({"name": os.path.basename(path), "text": sugg[0], "weight": s1,
+                                         "source": _s})
+                sugg = []
+            else:
+                sugg = (entry.get("triggers") or [])[:1 if add_triggers == "catalog" else None]
+            for t in sugg:
                 if t and t.lower() not in _seen_trig:
                     _seen_trig.add(t.lower())
                     triggers.append(t)
             print(f"[EricKrea2-LoRA] + suggested {entry.get('role', '')}: {entry.get('name', os.path.basename(path))} "
                   f"S1 {s1} / S2 {entry.get('weight_s2')} / S3 {entry.get('weight_s3')}")
 
+        if recipe_items:
+            # one tidy phrase list for the whole stack: repeats dropped, picks kept whole, a word budget by
+            # weight, opposite words reported (_prompt_merge)
+            from .._prompt_merge import merge_recipes, report_lines
+            phrases, rep = merge_recipes(recipe_items, prompt or "")
+            for t in phrases:
+                if t.lower() not in _seen_trig:
+                    _seen_trig.add(t.lower())
+                    triggers.append(t)
+            for line in report_lines(rep):
+                print(f"[EricKrea2-LoRA] prompt words: {line}")
         new_pipeline["lora_stack"] = stack
         out_prompt = merge_triggers_into_prompt(
-            prompt, triggers, add_triggers,
-            pipe=pipeline.get("pipeline") if isinstance(pipeline, dict) else None)
+            prompt, triggers, "prepend" if add_triggers in ("catalog", "recipe", "full") else add_triggers,
+            pipe=pipeline.get("pipeline") if isinstance(pipeline, dict) else None, join=trigger_join)
         print(f"[EricKrea2-LoRA] Multi-LoRA queued {added} adapter(s) "
               f"(ephemeral={ephemeral}); stack depth {len(stack)}. "
               "Realized at generation by the Multi-Stage Ultra node.")

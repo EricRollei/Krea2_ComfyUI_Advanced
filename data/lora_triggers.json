@@ -139,6 +139,319 @@
       "fetched_at": "2026-10-08",
       "civitai_version_id": 3130357,
       "civitai_model_id": 715602
+    },
+    "l:\\models\\loras\\krea2\\comic\\1045210-didier_tarquin_style__krea2__flux_\\3151655-krea2\\3151655_krea2_tarquin_v1.safetensors": {
+      "sig": "228588904|1784800457",
+      "trigger_words": [
+        "1970's grainy graphic novel comic book illustration"
+      ],
+      "name": "Didier Tarquin Style [Krea2, Flux] - Krea2",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-12",
+      "civitai_version_id": 3151655,
+      "civitai_model_id": 1045210
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\2701936-arcana_press_-_a_vintage_pulp_horror___comic_inspired_style_lora___ill_ani_krea2_\\3113777-krea_2\\3113777_arcana_press_-_krea2.safetensors": {
+      "sig": "228588920|1783931782",
+      "trigger_words": [
+        "arcanapress"
+      ],
+      "name": "Arcana Press - A Vintage Pulp Horror / Comic Inspired Style LoRA  [ILL/ANI/KREA2] - Krea 2",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-12",
+      "civitai_version_id": 3113777,
+      "civitai_model_id": 2701936
+    },
+    "l:\\models\\loras\\krea2\\illustration\\2995087-michael_parkes_illustration\\3396751-krea2_v1\\3396751_michaelparkes_000001700_bf16.safetensors": {
+      "sig": "228653597|1791675470",
+      "trigger_words": [
+        "mparkes",
+        "agic realism with meticulous fine linework and soft refined shading. delicate ethereal finish, classical idealized forms, weightless dreamlike atmosphere, precise crystalline detail, subtle ornamental line quality,",
+        "Warm sepia and luminous limited palettes"
+      ],
+      "name": "Michael Parkes illustration - Krea2 v1",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-18",
+      "sha256": "44cb625b1b5f68a58fa3a289e6a6cc61043aad049963c4890b6062cac5ab4ebe",
+      "civitai_version_id": 3396751,
+      "civitai_model_id": 2995087
+    },
+    "c:\\users\\eric\\appdata\\local\\anthropicclaude\\app-2.31226.1\\3179892_yiyi_cynprntx_krea2_v1-000008.safetensors": {
+      "sig": "",
+      "trigger_words": [
+        "cynprntx"
+      ],
+      "name": "CynprntX | Cyanotype Art Style for [Krea 2] 蓝晒艺术风格 - v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-13",
+      "civitai_version_id": 3179892,
+      "civitai_model_id": 2819068
+    },
+    "c:\\users\\eric\\appdata\\local\\anthropicclaude\\app-2.31226.1\\3308731_esoterica_krea2.safetensors": {
+      "sig": "",
+      "trigger_words": [
+        "esoteric@"
+      ],
+      "name": "Esoterica - A Esoteric Diagrammatic Surrealism Style [KREA2] - v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-13",
+      "civitai_version_id": 3308731,
+      "civitai_model_id": 2924141
+    },
+    "l:\\models\\loras\\krea2\\nsfw\\2788461-kr2_promising_sex-appeal\\3142069-kr2_ps_v01_ep09\\3142069_v45v7hcz2hez86nt0nfj023r60.safetensors": {
+      "sig": "228588904|1784530936",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-13",
+      "civitai_version_id": 3142069,
+      "id_not_found": true,
+      "sha256": "be225982f02cdf8aef409867e52f07efcb9ca2ede57900334203eb8008533529",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\sliders\\krea2-age-slider%20v2.safetensors": {
+      "sig": "114325256|1789099405",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-13",
+      "sha256": "747118cdf5df9a8884247b1a7f8117977d3ededf2f6172fceb5d00fa133164d4",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\eric\\krea2_exp_r128_m020c060tneg30.safetensors": {
+      "sig": "936944466|1784092263",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-13",
+      "sha256": "3610c391d7f9edee88503aefce62ed17fe2e98a5601955c6dbdf965d951d0f5b",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\eric\\krea2_exp_r256_m020c070tneg310.safetensors": {
+      "sig": "1872209314|1784096097",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-13",
+      "sha256": "88bb7a0879b8633bd4df56992a0d334dfd4deef2c3d054fbefd143514a51f7b2",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\eric\\krea2_exp_r256_m025c050tneg2.safetensors": {
+      "sig": "1872209314|1784092145",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-13",
+      "sha256": "1dab9a651f3a030751e90f03ca8430af29c604e610222a3821ef360517576859",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\tools\\krea2_turbo_residual_diff_v1.safetensors": {
+      "sig": "5993944|1784096768",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-13",
+      "sha256": "5d123039fd02746b144f45a771fd3d4f964f0213800d51021be916795ede21d8",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\comic\\2788336-rosy_lofi_illustration\\3141921-krea2\\3141921_rosy-lofi-illustration.safetensors": {
+      "sig": "228591760|1784579812",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-14",
+      "sha256": "041b387180c5ec1912df80b44cfebdbe78d6c78e1109e41cc362588cdc4d2922",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\ptotostyle\\2880467-the_yarn_collection_for_krea2\\3255885-thisyearsmodel\\3255885_yarn_thisyearsmodel_bf16.safetensors": {
+      "sig": "228591760|1791578398",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-14",
+      "sha256": "046e489a2408cc3d9eb176923499f8355942253ea94c5dec20af7a08ab424578",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\krea2\\comic\\2999675-hugo_pratt_-_corto_maltze_-_krea2\\3402484-v1_0\\3402484_c0rt0mtzstl_bf16.safetensors": {
+      "sig": "234703760|1792005658",
+      "trigger_words": [
+        "C0rt0MtzStl"
+      ],
+      "name": "Hugo Pratt - Corto Maltze - Krea2 - v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-15",
+      "civitai_version_id": 3402484,
+      "civitai_model_id": 2999675
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\2805581-ethereal_gothic\\3163371-krea2\\3163371_etherialgothickrea2raw_bf16.safetensors": {
+      "sig": "228587736|1792005751",
+      "trigger_words": [
+        "ArsMJStyle, Etherial Gothic,"
+      ],
+      "name": "Ethereal Gothic - Krea2",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-16",
+      "civitai_version_id": 3163371,
+      "civitai_model_id": 2805581
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\3315400-v2_0__krea_2_raw_\\3315400_dc_vivid_dark_fantasy_painting__krea2raw__gpt4_1captioned__trigger_dcd_rkf_ntsy___rank32__v2_000007000_bf16.safetensors": {
+      "sig": "228587880|1791789852",
+      "trigger_words": [
+        "dcd@rkf@ntsy."
+      ],
+      "name": "DC Vivid Dark Fantasy Painting - v2.0 [Krea 2 Raw]",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-16",
+      "civitai_version_id": 3315400,
+      "civitai_model_id": 2205285
+    },
+    "l:\\models\\loras\\krea2\\tools\\experiments\\krea2_textfusion_refusal_reduction.safetensors": {
+      "sig": "27665664|1783977044",
+      "trigger_words": [],
+      "name": "",
+      "source": "none",
+      "fetched_at": "2026-10-22",
+      "sha256": "84ec722ddab93f6489c5315bca25de5dd1a7b7ec5045a3c4ce2f97f62e54e8e6",
+      "hash_not_found": true,
+      "not_found": true
+    },
+    "l:\\models\\loras\\z_image\\photostyle\\235495-cinematic_kodak_motion_picture__film_still__style_xl___f1d___illu___pony___zit\\2530031-kodakmotionpicture_zit_v1\\2530031_kodak_film_style_v1.safetensors": {
+      "sig": "170127808|1768800883",
+      "trigger_words": [
+        "cinematic style",
+        "cinematic film style",
+        "52197219 cinematic style",
+        "KODAK VISION3 500T Film style",
+        "warm light style",
+        "cool light style",
+        "Kodak VISION3 50D style",
+        "cinematic daylight film style",
+        "dramatic light style",
+        "analog film"
+      ],
+      "name": "Cinematic Kodak Motion Picture \"Film Still\" Style XL + F1D + Illu + Pony + zit - KodakMotionPicture ZIT v1",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-20",
+      "civitai_version_id": 2530031,
+      "civitai_model_id": 235495
+    },
+    "l:\\models\\loras\\krea2\\comic\\2840835-comic_mix\\3206838-krea_2_v1_0\\3206838_comic_mix_bf16.safetensors": {
+      "sig": "228587504|1793037387",
+      "trigger_words": [
+        "CMIX"
+      ],
+      "name": "Comic MIX - Krea 2 v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-26",
+      "civitai_version_id": 3206838,
+      "civitai_model_id": 2840835
+    },
+    "l:\\models\\loras\\krea2\\comic\\2597963-kreacomics\\3428682-v2\\3428682_kreacomics_v2_bf16.safetensors": {
+      "sig": "228588904|1792988949",
+      "trigger_words": [
+        "Bradhamel art style"
+      ],
+      "name": "KreaComics - V2",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-26",
+      "civitai_version_id": 3428682,
+      "civitai_model_id": 2597963
+    },
+    "l:\\models\\loras\\krea2\\comic\\1349631-dark_ghibli_fairytales\\3128819-krea2\\3128819_darkghiblikrea2raw_bf16.safetensors": {
+      "sig": "228587736|1792784153",
+      "trigger_words": [
+        "Studio Ghibli Dark Fairytale,"
+      ],
+      "name": "Dark Ghibli Fairytales - Krea2",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-26",
+      "civitai_version_id": 3128819,
+      "civitai_model_id": 1349631
+    },
+    "l:\\models\\loras\\krea2\\comic\\2971060-krea_2___poly_style\\3366849-v1_0\\3366849_krea_2__poly_style_fp16.safetensors": {
+      "sig": "234680592|1793036906",
+      "trigger_words": [
+        "k2poly"
+      ],
+      "name": "Krea 2 | Poly_Style - v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-26",
+      "civitai_version_id": 3366849,
+      "civitai_model_id": 2971060
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\2896759-modern_ukiyo\\3274963-v1\\3274963_3274963_training_data.bin": {
+      "sig": "90363643|1790902364",
+      "trigger_words": [
+        "modernukiyo"
+      ],
+      "name": "Modern Ukiyo - V1",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-27",
+      "civitai_version_id": 3274963,
+      "civitai_model_id": 2896759
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\731320-ww2_propaganda\\3263698-v1_0_k2\\3263698_ww2_propaganda_epoch_10_bf16.safetensors": {
+      "sig": "228588920|1793037810",
+      "trigger_words": [
+        "ww2 propaganda"
+      ],
+      "name": "WW2 Propaganda - v1.0 K2",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-27",
+      "civitai_version_id": 3263698,
+      "civitai_model_id": 731320
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\2909286-moebius_style\\3290513-krea_2_v1_0\\3290513_moebius_bf16.safetensors": {
+      "sig": "457111968|1793124621",
+      "trigger_words": [
+        "Moebius"
+      ],
+      "name": "Moebius Style - Krea 2 v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-27",
+      "civitai_version_id": 3290513,
+      "civitai_model_id": 2909286
+    },
+    "l:\\models\\loras\\krea2\\illustration\\3021403-kreacarlosnine\\3430698-v1\\3430698_kreacarlosnine_bf16.safetensors": {
+      "sig": "228588968|1793036617",
+      "trigger_words": [
+        "Bradhamel art style"
+      ],
+      "name": "KreaCarlosNine - V1",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-27",
+      "civitai_version_id": 3430698,
+      "civitai_model_id": 3021403
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\2762409-gerald_brom\\3108946-v1_0\\3108946_gerald_brom_k2_bf16.safetensors": {
+      "sig": "234720056|1793149738",
+      "trigger_words": [
+        "Geraldbrom"
+      ],
+      "name": "Gerald Brom - v1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-27",
+      "civitai_version_id": 3108946,
+      "civitai_model_id": 2762409
+    },
+    "l:\\models\\loras\\krea2\\graphic-art\\2885510-inkpoet\\3261723-v1_0\\3261723_3261723_training_data.bin": {
+      "sig": "137854146|1790737898",
+      "trigger_words": [
+        "inkpoet"
+      ],
+      "name": "Inkpoet - V1.0",
+      "source": "civitai_id",
+      "fetched_at": "2026-10-28",
+      "civitai_version_id": 3261723,
+      "civitai_model_id": 2885510
     }
   }
 }

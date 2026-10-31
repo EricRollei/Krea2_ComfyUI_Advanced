@@ -64,6 +64,113 @@ No dependency on any other node pack.
 
 ## What's New
 
+**Late October 2026 - LoRA picks by creator, one pick per prompt, random word options.**
+
+- **`creator=`** in Sweep Plan catalog picks (`random: catalog creator=Adel_Ai x4`), alias `author=`;
+  combines with `tag=`, `kind=`, `role=` and `arch=` (default Krea2, `arch=any` = every base). The
+  creator is now part of the searchable card text too, as in the catalog's search box.
+- **`per prompt`** - each prompt line gets its own pick, paired instead of crossed: bakeoff
+  `random: catalog creator=Adel_Ai per prompt` = one LoRA per prompt; stacks
+  `random: catalog creator=Adel_Ai x2 per prompt @0.8` = one 2-LoRA stack per prompt.
+- **`#random`** word option in sweeps (`name #random`), **`3: random`** in the LoRA Stack's
+  `word_options` (a new option every queue), and an amber dot on stack slots whose LoRA has word
+  options but none chosen. See [LoRA picks in the Sweep Plan](#random-lora-picks).
+
+**Late October 2026 - SDE band, rectified-flow churn, trajectory probe.**
+
+- **New node: Eric Krea2 Hybrid Sigma Handoff** (2026-10-23) - wire its `sampling` output into
+  Ultra's optional `sampling` input. It holds the hybrid handoff, SDE band and churn form, so the
+  Ultra panel stays small; unwired, Ultra behaves exactly as before. **Hybrid handoff by sigma:**
+  `sN_hybrid_handoff` switches lcm_hybrid / lcm_hybrid2 from lcm to the tail at a sigma instead of
+  a step count (first step at or below it), so one value works on every schedule and step count;
+  0.70 reproduces 7 of 12 on linear. 0 = use `sN_hybrid_steps`.
+- **SDE band per stage** - `s1/s2/s3_sde_hi` and `_sde_lo` (on the Hybrid Sigma Handoff node) limit eta's
+  churn to a sigma range, e.g. noise only in the composition band (1.0-0.5) or only in the detail
+  band (0.5-0.15). Defaults (1 / 0) = previous behaviour. The console says how many steps churned.
+- **`churn_form` ve | rf** - `rf` injects eta's noise in the rectified-flow form; the classic `ve`
+  form over-weights the image signal on flow models (measured +1.4% at eta 0.3, +19.8% at eta 1.0
+  on one mid-sigma step). Default `rf` since 2026-10-25, with or without the node (ve burnt all 8 samplers in the screen at eta 0.8); set `ve` on the node to reproduce older eta > 0 images.
+- **Trajectory probe** - every stage now prints how fast the model's predicted image changes and a
+  free per-step error estimate; sweeps get `probe_*` columns in the CSV and review workbook.
+  Diagnostic only, never changes the image.
+  See [SDE band, churn form & the trajectory probe](#sde-band-churn-form--the-trajectory-probe).
+
+**Mid-October 2026 - sweeps that explain themselves, random LoRA picks, prompt LoRA tags.**
+
+- **Sweep folders explain themselves** - the Sweep Plan has a new `run_notes` field (last
+  widget: why you are running this sweep today). Every sweep folder now gets
+  `sweep_info.txt` (preset name, preset notes, run notes, checkpoint, what varied) and
+  `sweep_review.xlsx`, a review workbook with thumbnails, what varied, empty columns for your
+  own ratings, and the UniPercept scores and metrics. Works for any sweep (LoRA, sampler,
+  model...), and is written even when you cancel. See [Parameter sweeps](#parameter-sweeps).
+- **Random LoRA picks in the Sweep Plan** - `random: graphic-art x6` in `lora_files` picks 6
+  LoRAs from a folder; in stacks mode a slot can be random
+  (`random: graphic-art x4 @0.8 | V0id @0.6`). Repeatable by default, `seed=new` for a fresh
+  draw. See [Random LoRA picks](#random-lora-picks).
+- **Prompt LoRA Tags** - new **Eric Krea2 Prompt LoRA Tags** node: write
+  `<lora:Shouji_Ink_KR2:0.66>` in a prompt; the node removes the tag and feeds the LoRA to the
+  Multi-LoRA Stack's `suggestions` socket. See [Prompt LoRA tags](#prompt-lora-tags).
+- **LoRA names forgive Civitai download names** - a bare name like `Shouji_Ink_KR2` now also
+  finds `3317450_shouji_ink_kr2_bf16.safetensors` (version-id prefix and `_bf16` / `_fp16` /
+  `_fp8` suffix ignored), as long as exactly one file matches. Used by the Prompt LoRA Tags
+  node and the random picks.
+- **Sweep names in folders and files** - a sweep folder is now
+  `<date_time>_<sweep name>_<checkpoint>` and its files are `sweep_manifest_<name>.json`,
+  `sweep_summary_<name>.csv`, `sweep_review_<name>.xlsx`, `sweep_info_<name>.txt`. The name is
+  the preset, `custom`, or `<preset>-edited` when you changed a loaded preset - `sweep_info`
+  then says which preset and which fields. Older folders keep their old names and still work
+  everywhere.
+- **Every cell's LoRAs in the CSV and review workbook** - a `LoRAs used` column with each
+  cell's actual stack and weights, whatever was swept (rebuilding an older sweep's workbook
+  reads it from the cell PNGs).
+- **Stack screens: `cross:`, stack_parts, Start 12 / 13** (2026-10-16) - a stack line starting with `cross:` makes
+  every combination of its slots' picks (`cross: random: illustration x4 | random: graphic-art x4 | random: treatment
+  x4` = 64 stacks). The new Sweep Plan field `stack_parts` (appended last) picks what goes next to each stack:
+  each LoRA alone (as before), reference only, build up (A, A+B, A+B+C) or leave one out. Start 12 screens 64
+  trios; Start 13 builds up the winners, which the LoRA Catalog's Sweeps page lists for you (Follow-up button).
+  See [docs/SWEEPS.md](docs/SWEEPS.md#picking-loras-for-you).
+- **Share sheets for posting** (2026-10-16) - a finished sweep also writes ready-to-post JPEGs into
+  `<sweep>/share/`: one labelled strip per prompt (prompt and shared settings on top; each image's LoRA short
+  name, weight, creator and Civitai model number underneath; 768 px images, wrapping at 6000 px) and/or every
+  image labelled on its own. New Sweep Plan fields `share_sheets` / `share_background` (appended last). The new
+  **Eric Krea2 Sweep Sheets** node, and the LoRA Catalog's Sweeps page (with your star ratings and notes), make
+  them again for any sweep. See [docs/SWEEPS.md](docs/SWEEPS.md#share-sheets-for-civitai-reddit-).
+- **Sweep guide, Show plan, Start presets** (2026-10-16) - [docs/SWEEPS.md](docs/SWEEPS.md) is a
+  practical guide to the Sweep Plan with examples. *Show plan* (under the node) lists every cell before you
+  queue: its LoRAs and weights, its settings and the exact words added to its prompt. Eleven *Start*
+  presets cover the common questions (strength ladder, folder bake-off, pairs, samplers, steps, seeds...).
+- **Trigger words: four plain choices** (2026-10-16) - on Apply LoRA, Multi-LoRA Stack and Sweep Plan:
+  `none`, `trigger` (the card's main trigger), `full` (official words + trigger + style phrase) and
+  `saved pick` (the words picked for the loaded checkpoint, else trigger + style phrase; the Sweep Plan's
+  new default). Older workflows' off / catalog / recipe load as none / trigger / saved pick.
+- **Paste LoRA button on the Multi-LoRA Stack** (2026-10-16) - copy a LoRA in the LoRA Catalog
+  (*copy name*, *copy as prompt tag*, or the path) and press *Paste LoRA from clipboard*: it goes into
+  the next empty slot at its card weight (a tag's weight wins). Reminder: clicking the middle of a
+  slot's dropdown opens a search over names, triggers and catalog cards (Shift+click = plain list).
+- **Sweep Plan: Clear button, empty sampler lists** (2026-10-16) - a *Clear sweep* button at the
+  bottom of the node puts every field back to its default (keeps `output_folder` and `enabled`,
+  empties the notes; asks first). `samplers` and `schedulers` now start empty on a new node; the
+  preset *All samplers + schedulers (lists only)* fills both with every option and touches nothing
+  else. Nodes already in your workflows keep what they have.
+- **`all:` and catalog picks in `lora_files`** (2026-10-16) - `all: illustration` = every LoRA in
+  the folder; `random: catalog watercolor x4` and `all: catalog tag="art nouveau"` pick from the
+  LoRA Catalog by words and filters. Names typed by hand now resolve like Civitai downloads
+  (version prefix and `_bf16` may be left off). See [Random LoRA picks](#random-lora-picks).
+- **Prompt words merged for a stack** (2026-10-16) - with `recipe` triggers, the words of all the
+  LoRAs in a stack are merged once: repeats dropped, picks kept whole, a word budget shared by
+  weight, opposite words ("muted" vs "vibrant") reported. See
+  [LoRA trigger words](#lora-trigger-words-base-model-vs-fine-tunes-measured-oct-2026).
+- **`<lora:...>` tags in sweep prompts load** - in a sweep, tags in a cell's prompt are taken out
+  of the text and loaded for that cell (a tag for a LoRA already in your stack sets its weight).
+  Before this they were encoded as plain words and nothing loaded.
+- **No more over-cap surprises** - `max_combos` now defaults to 0 = no cap, and the Sweep Plan
+  shows the cell count under the node as you edit (counted by the same code the queue runs).
+  Nodes already in your workflows keep their saved cap (64): set it to 0 there.
+- **`recipe` trigger mode** - on Apply LoRA, Multi-LoRA Stack and the Sweep Plan: each LoRA gets
+  the prompt words chosen in the LoRA Catalog for the loaded checkpoint (your pick, else a
+  trigger test's pick, else trigger + style phrase). See
+  [LoRA trigger words](#lora-trigger-words-base-model-vs-fine-tunes-measured-oct-2026).
+
 **October 2026 - image-to-image suite, negative guidance, native quantized compute.**
 
 - **Control (ControlNet-LoRA)** - new **Eric Krea2 Control** node + Ultra `control` socket:
@@ -271,7 +378,8 @@ See [Samplers & schedules](#samplers--schedules).
 
 - **Eric Krea2 Sweep Plan** - builds a `KREA2_SWEEP` plan (grid axes or
   JSON-lines combos, stage scoping, quick-screen mode, output folder, hard
-  combo cap). Wire into Ultra V2's `sweep` input.
+  combo cap, LoRA bake-offs / stacks with random picks, `run_notes`). Wire into
+  Ultra V2's `sweep` input.
 - **Eric Krea2 Sweep → Preset** - promotes any cell of a finished sweep's
   manifest into `ultra_presets.json`, tagged with the checkpoint name.
 See [Parameter sweeps](#parameter-sweeps).
@@ -340,6 +448,7 @@ shared with displays, so try 1 MP first.
 | **Eric Krea2 Component Loader** | Loads pipeline components (base folder + optional single-file transformer / VAE / text encoder) with a preset dropdown. Reads bf16, GGUF, fp8, INT8, INT8-ConvRot, MXFP8, NVFP4, ConvRot-W4A4, W4A8, W6A8 ([formats](#quantized-checkpoints-the-component-loader-reads)); `compute` = `bf16` or `native` quantized kernels ([native compute](#native-quantized-compute)); VAE tiling controls. |
 | **Eric Krea2 Apply LoRA** / **Unload LoRA** / **Diagnose LoRA** | Apply, cleanly remove, and inspect LoRA adapters on the cached pipeline. Apply LoRA supports **per-stage weights** (`per_stage_weights` + `weight_s1`/`weight_s2`/`weight_s3`) so a LoRA's strength can differ across S1/S2/S3 in a multi-stage run, plus a **preset dropdown** (`apply_lora_preset` + ★ Save). |
 | **Eric Krea2 Multi-LoRA Stack** | Stack several LoRAs in one growable node - each slot has **per-stage weights** (`strength_Ns1`/`s2`/`s3` for S1/S2/S3) and an on/off toggle, plus a shared `ephemeral` switch and a **preset dropdown** (`lora_preset` + ★ Save). Unused rows auto-hide until needed. Click the middle of a LoRA dropdown for the 🔍 [search popup](#lora-search--suggestions) (also on Apply / Diagnose LoRA); optional `suggestions` socket for the LoRA Suggester. |
+| **Eric Krea2 Prompt LoRA Tags** | Reads `<lora:name:weight>` tags out of a prompt, outputs the prompt without them plus a LoRA list for the Multi-LoRA Stack's `suggestions` socket (with trigger words). See [Prompt LoRA tags](#prompt-lora-tags). |
 | **Eric Krea2 Unload Models** | Free VRAM on demand. |
 | **Eric Krea2 Save Latent (debug)** | Save/inspect a packed latent for debugging. |
 
@@ -613,6 +722,80 @@ off earlier and develops more fine detail; **8** (sometimes 9) launders
 longer for a cleaner, less-detailed look. The recipe re-derives itself per
 fine tune in one sweep: samplers `lcm_hybrid, lcm_hybrid2` x
 `hybrid_steps` `5, 6, 7, 8` x your saved curves in `sigma_profiles`.
+
+
+### SDE band, churn form & the trajectory probe
+
+Added 2026-10-22 (spec: `docs/spec_sde_band_and_trajectory_probe_2026-10-22.md`).
+
+**SDE band.** eta adds fresh noise after each step ("churn"). By default that happens on every
+step of the window. `sN_sde_hi` / `sN_sde_lo` restrict it to the steps whose *next* sigma lies
+inside the band; the rest of the window runs deterministic. It works with res_2m, res_2s,
+deis_3m, abnorsett_3m/4m, lawson4_4s, etdrk4_4s, rk6_7s and the tail of the lcm hybrids (euler,
+lcm and er_sde ignore it). Rough Krea2 guide: sigma 1.0-0.5 shapes composition and large
+structure, 0.5-0.15 form and detail, below that micro texture. ComfyUI's SA-Solver uses the
+band 0.93-0.44 on Krea2 (its 20-80% window at shift 1.15). Every churning stage prints e.g.
+
+    S1 SDE churn (ve, eta 0.5): band sigma[0.93->0.44]: 7/12 steps churned, sigma_next 0.90...0.51
+
+because how many steps land in a band depends on the schedule, steps, shift and window.
+
+**churn_form.** `ve` is the classic k-diffusion ancestral step (and ComfyUI's res_multistep
+ancestral). On a flow model it leaves too much image signal in the latent for the sigma the model
+is told - measured on a 0.760 -> 0.693 step: +1.4% at eta 0.3, +19.8% at eta 1.0. `rf` is the
+rectified-flow form ComfyUI uses for euler_ancestral_RF: it rescales the latent so the signal
+matches the sigma exactly. The same eta number means different amounts of noise in the two
+forms, so compare them in a sweep (`churn_forms: ve, rf` crossed with `etas`), not at one eta.
+Default `rf` since 2026-10-25 (an 8-sampler screen: ve burnt every sampler at eta 0.8, rf held). Images made with eta > 0 before that date used `ve`: set churn_form ve on the Hybrid Sigma Handoff node to reproduce one.
+
+**Trajectory probe.** A measurement, never a change to the image. At each step it reads the
+model's predicted clean image and prints per stage:
+
+    [EricKrea2-Probe] S1: lte sum 0.041 peak 0.012 @sigma0.71 | late(<0.3) 18% | drift peak 0.84 @sigma0.84 | clean 9/10 steps
+
+- *drift* - how fast the predicted image is changing per step of log-sigma. Its peak is where the
+  model is making its biggest decisions.
+- *lte* - a free local-error estimate (difference between a 2nd-order predictor and corrector
+  through the same predictions). High where the trajectory bends faster than the steps follow:
+  the place to add steps when designing a curve. Proportional to the real error, so compare
+  shapes and rankings, not absolute values.
+- *late* - share of the error below sigma 0.3 (fine detail).
+- *clean* - steps not disturbed by churn noise. Only clean steps count, so read the probe at
+  eta 0 or outside the SDE band; lcm steps and er_sde never count.
+
+In sweeps the same numbers land in `sweep_summary.csv` and `sweep_review.xlsx` as `probe_*`
+columns next to your ratings, and the full per-step curves go into `sweep_manifest.json`
+(`trajectory`). Stage 1 euler text-to-image runs through the stock pipe and is not probed.
+
+**Hybrid handoff by sigma** (2026-10-23, Hybrid Sigma Handoff node). `sN_hybrid_steps` sets the
+lcm -> tail switch as a step count, which lands at a different sigma on every schedule and step
+count. `sN_hybrid_handoff` sets it as a sigma: the lcm head runs until the ladder reaches it and the
+tail takes over from the first step at or below it. The console prints the split, e.g.
+`S1 hybrid handoff: 7/12 lcm steps -> tail from sigma 0.69 (handoff sigma 0.70 requested)`.
+**Choosing a handoff - detail vs clean.** The handoff is a dial, not a fixed best value. Higher
+(earlier switch, longer res_2m tail) = more fine detail and texture, with more risk to composition
+and correct drawing; lower (more lcm steps) = cleaner, more correct structure, softer detail. On 12
+linear steps: ~0.78 detailed, 0.65 balanced (the node default), 0.45-0.55 clean. Field results
+(2026-10-23, Eric's ratings): the darkroom prompt preferred 0.70, the coastal-house prompt 0.60,
+some subjects 0.45 - architecture, glass and hands tend to want lower, textured or atmospheric
+scenes can take higher. Values only matter where they land on the ladder: on 12 linear steps the
+real switch points are sigma 0.76 / 0.69 / 0.61 / 0.51 / 0.39, so 0.5 and 0.4 give the same image.
+eta, churn_form and the SDE band changed little on the hybrid (the tail is short and low-sigma);
+rf only helps with a long tail (high handoff) at eta > 0.
+
+**Strategy - clean structure first, detail later** (untested idea). Use a low S1 handoff (~0.5) to
+get correct composition and drawing, then let S2 put detail back on that settled structure (an S2
+refine window starting around sigma 0.5-0.6 with a detail-leaning sampler, or a modest S2 eta).
+Detail added during refinement sits on a structure that is already right, so it is less likely to
+draw things wrong than detail grown in S1. Test: S1 handoff 0.5 vs 0.78, each with and without the
+S2 detail pass - if clean S1 + S2 beats detailed S1, use it for subjects that need both.
+
+Refine windows (S2/S3) start at sigma 0.5-0.76, so keep their handoff inside the window. The node's
+churn_form defaults to `rf` - in the first res_2m sweep it never clipped while `ve` burnt at eta 0.7-1.0.
+
+**Sweep axes.** `hybrid_handoffs` takes sigmas (`0.8, 0.7, 0.6, 0.5`). `sde_bands` takes `hi-lo` pairs (`1-0, 0.93-0.44, 1-0.5, 0.5-0.15`) for the
+scoped stages; `churn_forms` takes `ve, rf`. Cells where the band can't matter (euler, lcm,
+er_sde, or eta 0 in the cell) are removed as duplicates.
 
 
 ## img2img
@@ -979,7 +1162,100 @@ limited so real edges pass, and an image with no detected lattice is left untouc
   else `L:/Models/loras/_lora_catalog.sqlite`; a missing catalog just means fewer fields.
 - **`suggestions` socket** on the Multi-LoRA Stack - LoRAs picked by the LoRA Suggester
   (video_prompter) are added after the panel's own slots with their per-stage weights and
-  trigger words; a file already in the stack is not added twice.
+  trigger words; a file already in the stack is not added twice. The Prompt LoRA Tags node
+  feeds the same socket.
+
+### Prompt LoRA tags
+
+The **Eric Krea2 Prompt LoRA Tags** node lets you load LoRAs from the prompt text, the way
+A1111-style prompts do:
+
+```
+a woman in a red coat <lora:Shouji_Ink_KR2:0.66>, rain
+```
+
+| Tag | Weight |
+|---|---|
+| `<lora:name>` | 1.0 on all stages |
+| `<lora:name:0.66>` | 0.66 on all three stages |
+| `<lora:name:1/0.7/0.4>` | per stage S1 / S2 / S3 |
+| `<lora:name:0.8:0.5>` (A1111 model:text-encoder) | the first number |
+
+**Wiring:** prompt in -> the node's `prompt` output (tags removed, stray commas tidied) goes
+on to the Multi-LoRA Stack's `prompt` input or the text encoder; its `loras` output goes into
+the Multi-LoRA Stack's `suggestions` socket. The stack adds those LoRAs after its own slots,
+never twice, with their trigger words (the LoRA Catalog card trigger first) in the
+`add_triggers` merge. The `summary` output lists what was loaded.
+
+**Names** are found like everywhere else in the pack: a full path, a loras-folder path
+(extension optional), or the bare file name / stem in any subfolder. Civitai download names
+are forgiven: `Shouji_Ink_KR2` finds `3317450_shouji_ink_kr2_bf16.safetensors` (the leading
+version id and a `_bf16` / `_fp16` / `_fp8` suffix are ignored), but only when exactly one file
+matches. An unknown or ambiguous name stops the run with the reason and the candidates;
+`on_missing = skip` drops it with a console note instead.
+
+## LoRA trigger words: base model vs fine-tunes (measured Oct 2026)
+
+How much a LoRA needs its trigger words depends on the **checkpoint**. A trigger test (LoRA Catalog
+`run.py triggers --plan-test`, details in the catalog's `docs/TRIGGERS.md`) rendered five Krea 2 style
+LoRAs with each prompt variant - no words, the trigger token, the official trained words, trigger + style
+phrase - plus a words-only cell without the LoRA, on three checkpoints. Score = CSD style gain toward the
+LoRA's own look over that checkpoint's plain no-LoRA render (one seed, one neutral subject, card weights):
+
+| LoRA | variant | Lox (fine-tune) | FinalCut (fine-tune) | base turbo |
+|---|---|---|---|---|
+| Michael Parkes | no words / trigger / official | +0.00 / +0.01 / +0.55 | +0.03 / +0.02 / +0.52 | **+0.44** / +0.24 / +0.57 |
+| Liquid Chalk | no words / trigger / trigger+phrase | +0.03 / +0.02 / +0.43 | +0.06 / +0.46 / +0.42 | **+0.60** / +0.60 / +0.69 |
+| Ukiyo-e | no words / trigger / official | -0.02 / +0.06 / +0.39 | -0.03 / +0.04 / +0.36 | +0.03 / +0.38 / +0.49 |
+| Ballpoint | no words / trigger | +0.02 / +0.80 | +0.17 / +0.82 | +0.08 / +0.70 |
+| zy cinematic | no words / trigger / trigger+phrase | +0.00 / +0.01 / +0.18 | +0.04 / +0.20 / +0.33 | +0.08 / +0.14 / +0.35 |
+
+- **Base turbo:** two of the five (Parkes, Liquid Chalk) show strongly with no words at all, and the bare
+  trigger token works far better than on the fine-tunes (Ukiyo-e +0.38 vs +0.06 on Lox). Stacks can stay
+  lean - a trigger, not a paragraph - leaving more of the 507-token budget for the subject and more LoRAs.
+- **Fine-tunes:** most LoRAs do almost nothing on a neutral prompt, and the bare trigger token does not
+  change that. The official trained words or trigger + a style phrase switch them on. Budget their words.
+- **Sometimes the words alone do it:** on Lox, Ukiyo-e and zy cinematic scored nearly the same from the
+  words without the LoRA - the checkpoint already knows that look.
+- **One trigger, two behaviours:** Ballpoint and Liquid Chalk share `n0vuschr0ma style`; on Lox it switches
+  Ballpoint fully on and does nothing for Liquid Chalk.
+
+Practical consequence for the trigger modes (`add_triggers` on the LoRA / Multi-LoRA Stack nodes,
+`lora_triggers` on Sweep Plan): `catalog` sends one short trigger, which is enough on the base model and
+often not enough on a fine-tune; `prepend` sends every Civitai trigger word. When testing a LoRA on a
+fine-tune, test it with its words.
+
+**The `recipe` trigger mode (2026-10-15)** puts these findings to work. On Apply LoRA, the
+Multi-LoRA Stack (`add_triggers`) and the Sweep Plan (`lora_triggers`), `recipe` prepends each
+LoRA's *prompt words* from the LoRA Catalog, chosen for the checkpoint that is loaded (the
+transformer file's name, the same name a sweep folder carries):
+
+1. your pick for this checkpoint (card editor "Prompt words", or "use words" on the Sweeps page),
+2. a trigger test's pick for this checkpoint (`run.py triggers --check`),
+3. your pick for every checkpoint, else the newest test pick,
+4. the recipe's trigger + style phrase (untested),
+5. the card's first trigger; no catalog words at all: as `catalog`.
+
+A pick of the *no words* variant adds nothing on purpose (some LoRAs show best without words on a
+base checkpoint). The console line says where each LoRA's words came from.
+
+**Merging a stack's words (2026-10-16, `_prompt_merge.py`).** With two or more LoRAs in
+`recipe` mode (Multi-LoRA Stack, Sweep Plan stacks), the words are merged once for the whole
+stack instead of pasted end to end:
+
+1. *Repeats* - a phrase said twice is kept once; a phrase whose words all sit in a longer
+   phrase of another LoRA is dropped ("watercolor washes" inside "delicate layered watercolor
+   washes"); phrases the prompt already says are dropped.
+2. *Picks* - a LoRA whose words are a pick (yours or a trigger test's) keeps all of them.
+3. *Order and length* - each LoRA's first phrase (its trigger) comes first, in stack order,
+   then phrases two LoRAs share, then the rest. The other LoRAs share a budget of about 60
+   words by weight; each keeps its first two phrases at least.
+4. *Conflicts* - opposite words between LoRAs, or a LoRA and the prompt ("muted" vs
+   "vibrant", "photorealistic" vs "anime", "dark" vs "airy" ...), are printed in the console
+   and, in a sweep, recorded per cell (`word_conflicts`). Nothing is removed for a conflict;
+   that choice is yours.
+
+A single LoRA's words are used as they are.
 
 ## Two high-res strategies
 
@@ -1117,9 +1393,12 @@ start/end step), `etas`, `noise_types`, `cfgs`, `shift_modes`/`mus`,
 `schedulers` field takes built-in schedules AND saved sigma-shape ★ preset
 names mixed freely (each entry resolves as a schedule first, then as a
 sigmas preset applied as that cell's full profile; unknown names are
-skipped with a console warning, never an abort), and comes pre-populated
-with everything available - delete what you don't want. Full cross product,
-hard-refused over `max_combos` with an axis-size breakdown. Cells that differ
+skipped with a console warning, never an abort). Both fields start empty
+(2026-10-16); the sweep preset *All samplers + schedulers (lists only)* fills them with
+everything available - delete what you don't want. *Clear sweep* (the button at the bottom
+of the node) resets every field to its default. Full cross product;
+a `max_combos` above 0 hard-refuses bigger plans with an axis-size breakdown (0, the default
+since 2026-10-15, = no cap - the readout under the node shows the cell count as you edit). Cells that differ
 only by inert knobs (eta/noise on `euler`/`lcm`) are deduped automatically.
 
 **Combos mode:** one JSON object per line in `combos_json`, or a file via
@@ -1134,7 +1413,10 @@ computed once and **reused** across cells (`s1_reused` in the manifest;
 automatically disabled per cell for anything that changes Stage 1, and
 globally under `seed_mode=same_all_stages`).
 
-**Outputs** (to `output/sweeps/<timestamp>_<finetune>/`, or `output_folder`):
+**Outputs** (to `output/sweeps/<timestamp>_<sweep name>_<finetune>/`, or `output_folder`). The
+sweep name is the preset name, `custom`, or `<preset>-edited`, and it is also in the file names
+below - `sweep_manifest_<name>.json` and so on (2026-10-15; older sweeps keep
+`sweep_manifest.json` etc., and every reader accepts both):
 - `cell_NNN_<values>.png` - every cell at full res with the complete resolved
   recipe (`ultra` + `loader` + `lora` sections) embedded in a
   `krea2_settings` chunk - each file is standalone-reproducible.
@@ -1142,7 +1424,23 @@ globally under `seed_mode=same_all_stages`).
   only the diffs vs base, green line = per-cell generation time + scores.
 - `sweep_summary.csv` - one row per cell: swept columns, `gen_time_s`,
   rounded scores - sortable in any spreadsheet.
-- `sweep_manifest.json` - full resolved recipes, timings, metrics, errors.
+- `sweep_manifest.json` - full resolved recipes, timings, metrics, errors, and an `about`
+  block (preset name, preset notes, run notes, random LoRA picks).
+- `sweep_info.txt` (2026-10-15) - what was run and why, in plain text: preset name, preset
+  notes, run notes, checkpoint, date and duration, cell count, what varied, the random LoRA
+  picks, and the panel settings every cell started from.
+- `sweep_review.xlsx` (2026-10-15, needs `openpyxl`) - one row per cell: a thumbnail, the
+  swept values, `LoRAs used` (each cell's actual stack and weights, swept or not), empty
+  columns for your own ratings (rating, fine detail, render quality,
+  contrast, composition, cohesiveness, notes), then the UniPercept scores from `scores.csv`
+  and the automatic metrics; panes frozen at the thumbnail; an About sheet with
+  `sweep_info.txt`. Works for any kind of sweep. When the workbook is rebuilt (e.g. after
+  scoring), the ratings and notes you typed are carried over cell by cell and the previous
+  file is kept as `sweep_review.prev.xlsx`; if the workbook is open in Excel the rebuild is
+  skipped with a note instead of failing. Older sweep folders can be backfilled:
+  `python _sweep_review.py <sweep folder> [...]`.
+
+The extra files are written even when you cancel a sweep, before the queue item stops.
 
 **Scores** (optional, CPU, milliseconds - failure detectors, not beauty
 judges): Laplacian + Tenengrad sharpness, wavelet noise sigma, flat-region
@@ -1193,21 +1491,183 @@ by construction.
 - **Strength ladder** (`lora_mode=strength_ladder`) - keeps the
   panel-declared stack and steps only the `lora_target` entry (1-based
   index, or a name substring) through `lora_strengths`.
+- **Stacks** (`lora_mode=stacks`, 2026-10-09) - tests LoRAs TOGETHER. One
+  whole stack per line in `lora_files`, LoRAs separated by `|`, each
+  `name @weight` (all three stages) or `name @s1/s2/s3` (no `@` = the LoRA's LoRA Catalog card weight,
+  else 1.0 - since 2026-10-15; the cell text, CSV and workbook show the number used); a name is a
+  loras-folder path, a full path, or just the file name (found in any subfolder, so a
+  line survives moving the LoRA);
+  lines starting with `#` are ignored:
+  `comic_book_v2 @0.8 | V0id @0.6`
+  `comic_book_v2 @0.8 | halftone_print @0.5 | Detail Slider @1.5`
+  `include_baseline` adds the no-LoRA reference cell PLUS each distinct
+  LoRA of the lines alone at its line weight, so every combination is judged
+  against its parts (duplicates dropped). `lora_strengths` is optional here:
+  multipliers that scale every weight of every stack and single (blank = as
+  written). `keep_panel_stack` layers each stack on your panel stack; trigger
+  words merge for every LoRA in the stack. Captions read
+  `comic_book_v2 @0.8 + V0id @0.6`. The LoRA Catalog writes these sweeps for you
+  (`run.py sweep-plan`, saved as a sweep preset) and marks the results on its Sweeps
+  page. Spec: docs/spec_lora_stack_sweeps_2026-10-09.md.
+- **Random LoRA picks** (2026-10-15) - see [Random LoRA picks](#random-lora-picks) below.
 - **Prompt axis** - one prompt per line in `prompts`; each prompt cell
   re-encodes (conditioning cleared automatically, ~seconds/cell). Prompts
   expand as the SLOWEST axis, so the contact sheet and CSV read in
   prompt-major blocks - metric comparisons are only meaningful within a
   block.
+- **Prompt files (2026-10-26)** - a line in `prompts` can pull prompts from a
+  text file (one prompt per line; blank and `#` lines skipped), worded like
+  the LoRA picks:
+
+  ```
+  file: D:\prompts\portraits.txt              (every prompt in the file; all: works too)
+  random: D:\prompts\portraits.txt x20        (20 different prompts, drawn at random)
+  random: D:\prompts\portraits.txt x20 seed=new   (a fresh 20 every queue)
+  A lighthouse at dawn, oil on canvas          (typed prompts still work, mixed in)
+  ```
+
+  No seed = the same draw every run, `seed=7` = another repeatable draw. A
+  relative path starts from the ComfyUI folder. Fewer lines than asked = all
+  of them (noted). Every cell records the actual prompt text, so results stay
+  reproducible if the file changes; editing the file rebuilds the plan on the
+  next queue. Combines with everything, e.g. `random: prompts.txt x20` plus
+  `random: catalog comic | random: catalog illustration per prompt` = 20
+  prompts, each with its own random comic + illustration stack.
 - **Sigma-profile axis** - `sigma_profiles` takes saved ★ preset NAMES from
   the Eric Krea2 Sigmas node (validated at plan time); each cell rebuilds
   the full bundle from that preset, overriding any wired sigmas node for
   that cell.
-- **Trigger words** (`lora_triggers`, default `append`) - each bake-off
-  cell merges its swept LoRA''s trigger words (from the stack node''s cached
-  trigger database) into that cell''s prompt, so trigger-dependent styles are
-  measured fully activated. Only sweep-injected entries contribute; baseline
+- **Trigger words** (`lora_triggers`, default `catalog`) - each bake-off
+  cell merges its swept LoRA''s trigger words into that cell''s prompt.
+  `catalog` = ONE trigger per LoRA from its LoRA Catalog card (your editor
+  priority first; switched-off triggers skipped), else the first cached
+  Civitai trigger, always prepended; `prepend` / `append` = every cached
+  Civitai trigger word; `off` = none (use it when the cells carry their own
+  words, as the trigger-test presets do). On fine-tuned checkpoints one short
+  trigger is often not enough - see *LoRA trigger words: base model vs
+  fine-tunes* above. Only sweep-injected entries contribute; baseline
   and ladder cells are untouched; a changed prompt re-encodes automatically;
   the effective prompt + triggers land in the cell''s metadata.
+
+#### Random LoRA picks
+
+In bake-off and stacks mode, a line (or a stack slot) in `lora_files` can draw LoRAs at
+random from a folder:
+
+```
+random: graphic-art x6                          (bakeoff: 6 different LoRAs)
+random: graphic-art x4 @0.8 | V0id @0.6         (stacks: 4 stacks, a new pick in each)
+random: graphic-art @0.7 | random: photo @0.5   (stacks: two random slots)
+```
+
+- **Folder:** a subfolder of `loras/Krea2` (`graphic-art`), a loras-folder path, or a full
+  path; subfolders are included (the Civitai `id-Name/id-version/` layout).
+- **`xN`** = how many (default 1). Picks are distinct while the folder has enough files;
+  two random slots in one stack never draw the same file, and a random slot never repeats a
+  LoRA written by hand in the same line.
+- **Seeds:** no seed = the same picks every run of the same text (repeatable);
+  `seed=7` (any word or number) = a different draw, also repeatable; `seed=new` = a fresh
+  draw every time the sweep is queued.
+- **Recorded:** the picks are printed in the console, written as loras-folder paths into
+  every cell (caption, CSV, PNG recipe, the workbook's `LoRAs used`), and listed under
+  "Random LoRAs" in `sweep_info` and the manifest's `about` block.
+- Mixes freely with ordinary lines, `lora_strengths` (including `card`), baselines and
+  `#` comment lines (now skipped in bake-off mode too, as the tooltip always said).
+
+**`all:` (2026-10-16)** takes every LoRA of the source instead of a random few:
+
+```
+all: illustration                               (bakeoff: one line per LoRA in the folder)
+Shouji_Ink_KR2 | all: illustration              (stacks: Shouji with each of the others in turn)
+```
+
+In stacks mode an `all:` slot makes one stack per LoRA in the source (minus LoRAs written by
+hand in the same line); with two `all:` slots the larger one sets the count.
+
+**Catalog sources (2026-10-16; creator filter and per-prompt picks 2026-10-26).** Instead of a
+folder, `random:` and `all:` can pick from the LoRA Catalog: `catalog` followed by words and filters.
+
+```
+random: catalog watercolor x4                     (4 LoRAs whose card mentions watercolor)
+all: catalog tag="art nouveau"                    (quotes for a phrase)
+all: catalog kind=style_medium ink                (kind = part of the card kind)
+random: catalog role=style noir x3                (role exact)
+random: catalog creator=Adel_Ai x4                (4 of Adel_Ai's Krea2 LoRAs)
+random: catalog creator=Adel_Ai tag=watercolor    (filters combine)
+all: catalog creator=Adel_Ai arch=Flux            (his Flux LoRAs instead of Krea2)
+```
+
+| Filter | Matches | Notes |
+|---|---|---|
+| plain words | anywhere on the card: name, file, folder, kind, effect, facets, artists, triggers, creator | every word must match |
+| `tag=` | the same card text, as one phrase | quotes for spaces: `tag="art nouveau"` |
+| `creator=` / `author=` | the card's creator | case, `_` and `-` ignored: `Adel_Ai` = `adel ai` |
+| `kind=` | part of the card's kind | `kind=style_medium` |
+| `role=` | the card's role, exactly | `role=style` |
+| `arch=` | the top folder under your loras folder (`Krea2`, `Flux`, `Z_Image`, `Wan`) | **default `Krea2`**; `arch=any` = every base |
+
+Only LoRAs whose file exists are picked. A query that finds nothing stops the plan with a clear
+message; **Show plan** lists the picks before you queue.
+
+**One pick per prompt - `per prompt` (2026-10-26).** Normally the prompts axis crosses with the LoRA
+list (10 prompts x 10 LoRAs = 100 cells). Add `per prompt` to a `random:` line and every prompt line
+gets its own draw instead, paired with it:
+
+```
+random: catalog creator=Adel_Ai per prompt                    (bakeoff: one LoRA per prompt)
+random: catalog creator=Adel_Ai x2 per prompt                 (bakeoff: two single-LoRA cells per prompt)
+random: catalog creator=Adel_Ai x2 per prompt @0.8            (stacks: ONE stack of two per prompt)
+random: catalog creator=Adel_Ai x2 per prompt | V0id @0.6     (stacks: two picks + a fixed LoRA in every stack)
+random: comic | random: illustration per prompt   (stacks: one from each folder - one 'per prompt' covers the line)
+```
+
+- **`xN` means different things by mode:** bakeoff = N separate cells per prompt, one LoRA each;
+  stacks = one stack holding N picks.
+- Needs the `prompts` field (one prompt per line), and the `per prompt` line must be the only line
+  in `lora_files`. Only `random:` works per prompt (not `all:`).
+- Picks are distinct within a stack, never repeat a LoRA written by hand in the line, and don't
+  repeat across prompts while enough LoRAs match; otherwise the plan notes that some prompts share.
+- No `@` = each pick gets its card weight. `seed=` works as for other picks.
+- `include_baseline` and `stack_parts` work within each prompt: its own no-LoRA reference, its own
+  LoRAs alone, build up, or leave one out.
+
+**Proven partners - `partner:` (2026-10-27).** In stacks mode a `partner:` slot adds a partner for the line's
+first LoRA, chosen from what you have already rated:
+
+```
+random: catalog comic x4 | partner: best           (4 stacks: each pick + its best partner)
+Frazetta Style | partner: random                   (one of Frazetta's good partners, a new one per seed)
+random: catalog creator=Adel_Ai per prompt | partner: best @0.6   (per prompt, partner at 0.6)
+```
+
+Partners come from the LoRA Catalog's **stack synergy** - how much better your rated stacks of the two scored
+than the two LoRAs' own ratings predict (prompt and checkpoint taken out; shown on each card as "Pairs well
+with"). With no rated stacks for that LoRA yet, it falls back to what Civitai users stack it with (owned LoRAs
+only, from `run.py harvest`). `best` (the default) takes the top one; `random` any of your positive partners;
+`@w` and `seed=` work as elsewhere. A LoRA already in the line is never its own partner; with no partner known
+the slot is dropped and Show plan says so. Rate stacks with `stack_parts` "each LoRA alone" so the catalog can
+compare the stack with its parts - that is what makes synergy reliable.
+
+**Word options in sweeps (2026-10-20; `#random` 2026-10-26).** For LoRAs whose card lists word
+options (Prompt words > Word options - e.g. one keyword per colour grade):
+
+```
+cinematic_grade #teal orange @0.8      (that option's words)
+cinematic_grade #each                  (one cell per option)
+cinematic_grade #random                (one option drawn at random)
+random: catalog creator=Adel_Ai x2 per prompt #random   (every pick draws its own option)
+```
+
+`#random` is drawn when the plan is built and is the same every run (like other picks without
+`seed=new`). A card can mark a default option with a leading `*`; it is used when you don't pick.
+In the LoRA Stack node the same choice lives in `word_options` (`3: teal orange`, or `3: random` for
+a new option every queue); an amber dot left of a slot means its LoRA has options and none is
+chosen - click it to pick.
+
+**Names typed by hand** in `lora_files` (and in stacks lines) now resolve like the Prompt LoRA
+Tags node: the exact file name or stem, or the Civitai name with the version-id prefix and the
+`_bf16` suffix left off. A name that fits two files stops with both listed. A LoRA written
+without `@` in a stack gets its card weight.
 
 All v2 axes cross with every classic axis, in grid mode AND on top of
 explicit combos, under the same cap and dedupe rules. LoRA/prompt/profile
@@ -1243,6 +1703,13 @@ exposure, UniPercept (with a `device` picker for the second GPU) - and
 writes/merges `scores.csv` in the sweep folder, one column per numeric
 output (`comp.composition_score`, `blur7.variance`, ...). Merging is by
 filename, so multiple grading passes stack columns instead of clobbering.
+UniPercept runs in its `direct_logits` mode here (2026-10-15): continuous 0-100 scores
+(`unip.iaa` aesthetics, `unip.iqa` quality, `unip.ista` structure & texture) plus a spread
+for each (`unip.iaa_sd` ...: how torn the model is, in score points; the workbook calls these
+columns *aesthetics doubt*, *quality doubt*, *structure doubt*), about 4x faster than
+the old whole-number mode. A grader that fails is recorded as a failure, never as placeholder
+scores. After scoring, the scorer rebuilds `sweep_review.xlsx` so the scores appear next to
+your ratings (ratings kept).
 The full hands-off chain is: Ultra V2 `sweep_manifest` -> `Krea2 Unload`
 (frees the generator's VRAM; its wildcard passthrough keeps the ordering) ->
 `Sweep Folder Scorer` -> `Auto Pick` (`best_external`) -> `Sweep -> Preset`:
@@ -1258,7 +1725,10 @@ Preset button saves the panel under a new name. Headless/API runs apply the
 named preset as the sole source. Both the Sweep Plan and Sigmas nodes carry
 a `preset_notes` field saved with each ★ preset - one sentence on what the
 preset is FOR - written into the panel on select and printed by headless
-runs, so preset libraries stay self-documenting.
+runs, so preset libraries stay self-documenting. The Sweep Plan's `run_notes`
+field (the last widget, 2026-10-15) is for THIS run - what you are checking, what changed
+since last time. It is never saved into a preset, typing in it does not flip the dropdown to
+`custom`, and it lands in `sweep_info.txt` and the manifest with the preset name and notes.
 
 **Swept schedules vs a wired sigmas bundle:** a cell that explicitly sweeps
 a stage's schedule disables the wired bundle for that stage, cell-locally -

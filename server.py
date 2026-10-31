@@ -29,7 +29,8 @@ import re
 # Preset sections -> their JSON library file (package root). Each file holds
 # { presetName: { <section>: { ...field: value... } } }. One file per section
 # preserves the original ultra_presets.json shape and back-compat.
-_ALLOWED_SECTIONS = ("ultra", "loader", "lora", "sigmas", "apply_lora", "decode_vae", "sweep")
+_ALLOWED_SECTIONS = ("ultra", "loader", "lora", "sigmas", "apply_lora", "decode_vae", "sweep",
+                     "sampling")
 
 # Never persist per-run values into a reusable recipe. Any "*_preset" control
 # widget (ultra_preset / loader_preset / lora_preset ...) is stripped too.
@@ -264,6 +265,76 @@ def _resolution_chain(body):
             "s1_s2_upscale_vae": use_s1s2_vae, "connected": connected}
 
 
+def _resolve_lora(text: str) -> dict:
+    """The Multi-LoRA Stack's paste button (2026-10-16): pasted text -> the slot dropdown's value + a weight.
+    Takes a file name or stem ("copy name" in the LoRA Catalog), a Civitai name with the version prefix / _bf16 left
+    off, a loras-folder or full path, or a <lora:name:weight> tag ("copy as prompt tag"; the words after it are
+    ignored). Weight: the tag's, else the LoRA Catalog card weight, else 1.0."""
+    raw = str(text or "").strip().strip('"').strip()
+    if not raw:
+        return {"ok": False, "error": "the clipboard is empty"}
+    weight, source = None, ""
+    m = re.search(r"<lora:([^>]+)>", raw, re.I)
+    if m:
+        parts = m.group(1).split(":")
+        name = parts[0].strip()
+        for p in parts[1:2]:
+            try:
+                weight, source = float(p), "tag"
+            except ValueError:
+                pass
+    else:
+        name = raw.splitlines()[0].strip()
+    from ._lora_names import find_lora
+    try:
+        path = name if os.path.isfile(name) else find_lora(name)
+    except ValueError as e:                     # two files fit: say which
+        return {"ok": False, "error": str(e)}
+    if not path:
+        return {"ok": False, "error": f"no LoRA file found for '{name[:120]}'"}
+    import folder_paths
+    value = ""
+    for root in folder_paths.get_folder_paths("loras"):
+        try:
+            rel = os.path.relpath(path, root)
+        except ValueError:                      # another drive
+            continue
+        if not rel.startswith(".."):
+            value = rel
+            break
+    if not value:
+        return {"ok": False, "error": f"{path} is not inside a ComfyUI loras folder"}
+    if weight is None:
+        try:
+            from ._catalog_lookup import card_weight
+            weight = card_weight(path)
+            source = "card" if weight is not None else ""
+        except Exception:
+            weight = None
+    if weight is None:
+        weight, source = 1.0, "default"
+    return {"ok": True, "value": value, "weight": float(weight), "weight_source": source,
+            "name": os.path.basename(path)}
+
+
+def _word_options(names) -> dict:
+    """The Multi-LoRA Stack's 'Pick words' button (2026-10-20): slot values -> each LoRA's catalog word options."""
+    from ._catalog_lookup import word_options
+    from ._lora_utils import get_lora_full_path
+    out = {}
+    for name in names or []:
+        name = str(name or "")
+        if not name or name == "none":
+            continue
+        try:
+            path = get_lora_full_path(name) or name
+        except Exception:
+            path = name
+        out[name] = [{"name": o.get("name"), "text": o.get("text") or "", "default": bool(o.get("default")),
+                      "source": o.get("source") or ""} for o in word_options(path)]
+    return {"ok": True, "loras": out}
+
+
 def register_routes():
     """Attach the save-preset route to ComfyUI's PromptServer, if present."""
     try:
@@ -283,6 +354,34 @@ def register_routes():
         except Exception as e:
             return web.json_response({"entries": [], "error": f"{type(e).__name__}: {e}"},
                                      status=500)
+
+    @routes.post("/eric_krea2/resolve_lora")
+    async def _resolve_lora_route(request):
+        # Multi-LoRA Stack paste button: clipboard text -> slot value + weight.
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        import asyncio
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(None, _resolve_lora, body.get("text", ""))
+        except Exception as e:
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return web.json_response(result)
+
+    @routes.post("/eric_krea2/word_options")
+    async def _word_options_route(request):
+        # Multi-LoRA Stack 'Pick words' button (2026-10-20): {loras: [slot values]} -> their word options.
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        import asyncio
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(None, _word_options, body.get("loras") or [])
+        except Exception as e:
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return web.json_response(result)
 
     @routes.post("/eric_krea2/save_preset")
     async def _save_preset_route(request):
@@ -363,7 +462,39 @@ def register_routes():
             return web.json_response({"ok": False, "error": f"{type(e).__name__}: {e}"}, status=500)
         return web.json_response(result)
 
-    print("[Eric_Krea2] registered POST /eric_krea2/save_preset, "
+    @routes.post("/eric_krea2/sweep_count")
+    async def _sweep_count_route(request):
+        # Sweep Plan readout (2026-10-15): how many cells the panel's current values make. Dry run, never fatal.
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        try:
+            from .nodes.krea2_sweep import count_cells
+            result = count_cells(body.get("values") or {})
+        except Exception as e:  # pragma: no cover
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return web.json_response(result)
+
+    @routes.post("/eric_krea2/sweep_preview")
+    async def _sweep_preview_route(request):
+        # Sweep Plan 'Show plan' window (2026-10-16): every cell, its LoRAs and the words each gets. Dry run.
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        import asyncio
+        try:
+            from .nodes.krea2_sweep import preview_plan
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, preview_plan, body.get("values") or {}, str(body.get("checkpoint") or ""),
+                str(body.get("prompt") or ""))
+        except Exception as e:  # pragma: no cover
+            result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        return web.json_response(result)
+
+    print("[Eric_Krea2] registered POST /eric_krea2/sweep_count, POST /eric_krea2/sweep_preview, "
+          "POST /eric_krea2/resolve_lora, POST /eric_krea2/word_options, POST /eric_krea2/save_preset, "
           "POST /eric_krea2/save_image_presets, GET /eric_krea2/get_presets, "
           "POST /eric_krea2/preview_sigmas, POST /eric_krea2/resolution_chain")
     return True

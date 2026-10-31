@@ -37,6 +37,25 @@ except Exception as e:  # pragma: no cover - surfaced in ComfyUI console
     print(f"[Eric_Krea2] Failed to import nodes: {e}")
     traceback.print_exc()
 
+# Imported on its own (2026-10-15) so a problem here can never take the other nodes down.
+try:
+    from .nodes import krea2_prompt_lora_tags
+    _MODULES.append(krea2_prompt_lora_tags)
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] Prompt LoRA Tags node not loaded: {e}")
+
+try:  # share sheets for finished sweeps (2026-10-16)
+    from .nodes import krea2_sweep_sheets
+    _MODULES.append(krea2_sweep_sheets)
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] Sweep Sheets node not loaded: {e}")
+
+try:  # Hybrid Sigma Handoff side panel for Ultra (2026-10-23)
+    from .nodes import krea2_hybrid_handoff
+    _MODULES.append(krea2_hybrid_handoff)
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] Hybrid Sigma Handoff node not loaded: {e}")
+
 for _m in _MODULES:
     NODE_CLASS_MAPPINGS.update(getattr(_m, "NODE_CLASS_MAPPINGS", {}))
     NODE_DISPLAY_NAME_MAPPINGS.update(getattr(_m, "NODE_DISPLAY_NAME_MAPPINGS", {}))

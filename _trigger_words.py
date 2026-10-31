@@ -303,7 +303,7 @@ def get_trigger_words(lora_path: str, force: bool = False) -> list:
     return list(get_trigger_info(lora_path, force=force).get("trigger_words", []))
 
 
-def merge_triggers_into_prompt(prompt: str, triggers: list, mode: str, pipe=None) -> str:
+def merge_triggers_into_prompt(prompt: str, triggers: list, mode: str, pipe=None, join: str = "comma") -> str:
     """Combine trigger words with a prompt. ``mode``: off|prepend|append.
     Triggers already present in the prompt (case-insensitive) are not added
     twice; returns the prompt unchanged for mode 'off' or no triggers.
@@ -317,8 +317,12 @@ def merge_triggers_into_prompt(prompt: str, triggers: list, mode: str, pipe=None
     missing = [t for t in triggers if t and not re.search(r"(?<!\w)" + re.escape(t.lower()) + r"(?!\w)", low)]
     if not missing:
         return prompt
-    tail = ", ".join(missing)
+    if str(join).lower() == "period":          # 2026-10-29: each LoRA's words its own sentence
+        tail = " ".join(t.strip().rstrip(",;:").rstrip() + ("" if t.strip().rstrip(",;:").rstrip()[-1:] in ".!?"
+                                                           else ".") for t in missing)
+    else:
+        tail = ", ".join(missing)
     if not prompt.strip():
         return tail
     from ._prompt_budget import merge_within_budget
-    return merge_within_budget(prompt, tail, mode, pipe, log_prefix=_LOG)
+    return merge_within_budget(prompt, tail, mode, pipe, log_prefix=_LOG, join=join)

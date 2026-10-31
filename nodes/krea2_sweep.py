@@ -75,8 +75,336 @@ def _floats(s: str, name: str) -> list:
     return out
 
 
+def _strengths(s: str, lora_mode: str) -> list:
+    """lora_strengths entries: numbers, or (bakeoff only) card / card_low / card_high = the LoRA
+    Catalog card weight of each swept LoRA (2026-10-12)."""
+    out = []
+    for t in _split(s):
+        key = t.strip().lower()
+        if key in ("card", "card_low", "card_high"):
+            # 'card' is the default (2026-10-12): outside bakeoff it means nothing (stacks keep the
+            # weights as written, a ladder needs numbers), so it is dropped there, with a note.
+            if lora_mode != "bakeoff":
+                print(f"[EricKrea2-Sweep] lora_strengths '{t}' (a LoRA Catalog card weight) applies to "
+                      f"bakeoff only - ignored for {lora_mode}")
+                continue
+            out.append(key)
+            continue
+        try:
+            out.append(float(t))
+        except ValueError:
+            raise ValueError(f"SweepPlan: 'lora_strengths' entry '{t}' is not a number or "
+                             f"card / card_low / card_high")
+    return out
+
+
+def _card_strengths(lora_file, values, notes) -> list:
+    """`values` with card tokens replaced by this LoRA's card weight (no card value = 1.0, said in the
+    note); a weight that comes out twice (e.g. 'card, 1.0' on a card that says 1.0) runs once."""
+    from .._catalog_lookup import card_weight, split_option
+    lora_file = split_option(lora_file)[0]                     # 'name #option' (2026-10-20): the LoRA is 'name'
+    try:
+        from .._lora_names import find_lora
+        lora_ref = find_lora(lora_file) or lora_file          # Civitai short names find their card too
+    except Exception:
+        lora_ref = lora_file
+    out = []
+    for v in values:
+        if isinstance(v, str):
+            w = card_weight(lora_ref, v)
+            notes.append(f"{os.path.basename(str(lora_file))} {v}="
+                         + (f"{w}" if w is not None else "1.0 (no card value)"))
+            v = w if w is not None else 1.0
+        if v not in out:
+            out.append(v)
+    return out
+
+
 def _ints(s: str, name: str) -> list:
     return [int(round(v)) for v in _floats(s, name)]
+
+
+def parse_stack_line(line: str, card_weights: bool = False, notes: list = None) -> list:
+    """lora_mode=stacks, one stack per line (2026-10-09, spec_lora_stack_sweeps):
+    'comic_v2 @0.8 | V0id @0.6 | Detail Slider @1.5/1.2/1'  ->  [(name, (w1, w2, w3)), ...]
+    '@w' = all three stage weights; '@s1/s2/s3' = per stage; no '@' = 1.0, or with card_weights=True (the plan)
+    the LoRA Catalog card weight, else 1.0. Names resolve like
+    bakeoff (loras-folder name or full path). The same LoRA twice in one line is refused (one
+    adapter per file). Shared by the plan (validation) and Ultra V2 (building the cell's stack).
+    Word options (2026-10-20): 'name #option @0.8' (or 'name @0.8 #option') picks one of the LoRA's
+    catalog word options for its words; the name comes back as 'name #option' (split_option() splits it)."""
+    from .._catalog_lookup import split_option
+    out, seen = [], set()
+    for part in str(line or "").split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        part, option = split_option(part)
+        name, weight = part, "1"
+        if "@" in part:
+            name, weight = part.rsplit("@", 1)
+            name = name.strip()
+        elif card_weights:
+            # no '@': the LoRA Catalog card weight (2026-10-15, Eric's call), else 1.0. Only the plan does this;
+            # the canonical line it writes carries the number, so Ultra V2 and the files show what ran.
+            try:
+                from .._catalog_lookup import card_weight
+                from .._lora_names import find_lora
+                w = card_weight(find_lora(name) or name)
+            except Exception:
+                w = None
+            weight = f"{w:g}" if w is not None else "1"
+            if notes is not None:
+                notes.append(f"{os.path.basename(name)} @{weight}" + (" (card)" if w is not None else " (no card weight)"))
+        try:
+            ws = [float(x.strip()) for x in weight.strip().split("/")]
+        except ValueError:
+            raise ValueError(f"SweepPlan stacks: bad weight in '{part}' "
+                             f"(write 'name @0.8' or 'name @s1/s2/s3')")
+        if len(ws) == 1:
+            ws = ws * 3
+        if len(ws) != 3:
+            raise ValueError(f"SweepPlan stacks: '{part}' needs one weight or three (s1/s2/s3)")
+        if not name:
+            raise ValueError(f"SweepPlan stacks: no LoRA name in '{part}'")
+        if name.lower() in seen:
+            raise ValueError(f"SweepPlan stacks: '{name}' appears twice in one stack: {line}")
+        seen.add(name.lower())
+        out.append((f"{name} #{option}" if option else name, tuple(ws)))
+    if not out:
+        raise ValueError(f"SweepPlan stacks: empty stack line '{line}'")
+    return out
+
+
+def format_stack(entries: list) -> str:
+    """[(name, (w1, w2, w3)), ...] -> the canonical line text (cell value, caption, CSV, filename)."""
+    def w(ws):
+        return f"{ws[0]:g}" if ws[0] == ws[1] == ws[2] else "/".join(f"{x:g}" for x in ws)
+    return " | ".join(f"{name} @{w(ws)}" for name, ws in entries)
+
+
+def _expand_each(items: list, notes: list, stacks: bool) -> list:
+    """'name #each' (2026-10-20): one line / file per word option of that LoRA (its LoRA Catalog card). Several
+    '#each' in one stack line = every combination. A LoRA without options keeps its usual words (said in a note)."""
+    import itertools
+    from .._catalog_lookup import EACH, split_option, word_options
+    try:
+        from .._lora_names import find_lora
+    except Exception:
+        find_lora = None
+
+    def choices(part):
+        rest, option = split_option(part)
+        if option.lower() not in (EACH, "random"):
+            return [part.strip()]
+        name, weight = (rest.rsplit("@", 1) + [""])[:2] if "@" in rest else (rest, "")
+        name, weight = name.strip(), weight.strip()
+        try:
+            ref = (find_lora(name) if find_lora else None) or name
+        except ValueError:
+            ref = name
+        opts = word_options(ref)
+        if not opts:
+            notes.append(f"'{os.path.basename(name)} #{option.lower()}': no word options on its card - usual words")
+            return [rest.strip()]
+        if option.lower() == "random":     # 2026-10-26: one option drawn at plan time, repeatable run to run
+            import random as _random
+            o = _random.Random(f"{name}|{part}").choice(opts)
+            notes.append(f"'{os.path.basename(name)} #random' -> {o['name']}")
+            return [f"{name} #{o['name']}" + (f" @{weight}" if weight else "")]
+        notes.append(f"'{os.path.basename(name)} #each' -> {len(opts)}: " + ", ".join(o["name"] for o in opts))
+        return [f"{name} #{o['name']}" + (f" @{weight}" if weight else "") for o in opts]
+
+    out = []
+    for item in items:
+        if "#" not in item:
+            out.append(item)
+        elif stacks:
+            parts = [p.strip() for p in item.split("|") if p.strip()]
+            out += [" | ".join(c) for c in itertools.product(*[choices(p) for p in parts])]
+        else:
+            out += choices(item)
+    return out
+
+
+def _same(a, b) -> bool:
+    try:
+        return abs(float(a) - float(b)) < 1e-9
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
+def _closest_preset(values: dict):
+    """(preset name, [fields that differ]) for the saved sweep preset the panel most resembles, or ('', []).
+    A preset counts when at least 70% of its stored fields (and 3 or more) still match the panel."""
+    try:
+        from .. import _settings as _st
+        presets = _st.load_presets("sweep") or {}
+    except Exception:
+        return "", []
+    best, best_score, best_diff = "", 0.0, []
+    for name, pf in presets.items():
+        if name == "custom" or not isinstance(pf, dict):
+            continue
+        pf = pf.get("sweep", pf)
+        common = [k for k in pf if k in values and k not in ("sweep_preset", "enabled", "run_notes",
+                                                             "share_sheets", "share_background")]
+        if len(common) < 3:
+            continue
+        diff = [k for k in common if not _same(pf[k], values[k])]
+        score = 1.0 - len(diff) / len(common)
+        if score > best_score:
+            best, best_score, best_diff = name, score, diff
+    return (best, sorted(best_diff)) if best_score >= 0.7 else ("", [])
+
+
+def count_cells(values: dict) -> dict:
+    """Dry run for the on-node cell counter (2026-10-15): build the plan from the panel values with no cap and
+    report the cell count. Never raises; nothing is written."""
+    import contextlib
+    import io
+    values = {k: v for k, v in (values or {}).items() if v is not None}
+    if values.get("enabled") is False:
+        return {"ok": True, "cells": 0, "note": "sweep off (enabled = false)"}
+    cap = int(values.get("max_combos") or 0)
+    for k in ("enabled", "sweep_preset", "run_notes"):
+        values.pop(k, None)
+    values["max_combos"] = 0
+    node = EricKrea2SweepPlan()
+    node._random_notes = []
+    try:
+        import inspect
+        valid = set(inspect.signature(node._build).parameters) - {"self"}
+        with contextlib.redirect_stdout(io.StringIO()):
+            (plan,) = node._build(**{k: v for k, v in values.items() if k in valid})
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+    n = len(plan.get("combos") or [])
+    out = {"ok": True, "cells": n, "cap": cap, "over_cap": bool(cap and n > cap)}
+    if any("seed=new" in str(x).replace(" ", "").lower() for x in node._random_notes):
+        out["note"] = "random picks change every queue (seed=new)"
+    return out
+
+
+PREVIEW_MAX_ROWS = 3000
+
+
+def _preview_path(name):
+    """A sweep LoRA name -> its file, the way Ultra V2 resolves it (loras-folder path, full path, file name, Civitai
+    name). None when not found."""
+    name = str(name or "").strip()
+    if os.path.isfile(name):
+        return name
+    try:
+        from .._lora_utils import get_lora_full_path
+        p = get_lora_full_path(name)
+        if p:
+            return p
+    except Exception:
+        pass
+    try:
+        from .._lora_names import find_lora
+        return find_lora(name)
+    except Exception:
+        return None
+
+
+def preview_plan(values: dict, checkpoint: str = "", panel_prompt: str = "") -> dict:
+    """The Sweep Plan's 'Show plan' window (2026-10-16): every cell the panel would run, in order - its settings,
+    its LoRAs and weights, and the exact words each cell's prompt gets (the same _sweep_words.cell_words Ultra V2
+    uses when it runs the cell). `checkpoint` = the transformer file stem found upstream of Ultra V2 by the JS ('' =
+    unknown: saved pick then shows the words chosen for every checkpoint). `panel_prompt` = Ultra V2's prompt
+    widget, for cells that do not sweep the prompt. Never raises; nothing is written."""
+    import contextlib
+    import io
+    values = {k: v for k, v in (values or {}).items() if v is not None}
+    if values.get("enabled") is False:
+        return {"ok": True, "rows": [], "cells": 0, "note": "sweep off (enabled = false)"}
+    for k in ("enabled", "sweep_preset", "run_notes"):
+        values.pop(k, None)
+    values["max_combos"] = 0
+    node = EricKrea2SweepPlan()
+    node._random_notes = []
+    try:
+        import inspect
+        valid = set(inspect.signature(node._build).parameters) - {"self"}
+        with contextlib.redirect_stdout(io.StringIO()):
+            (plan,) = node._build(**{k: v for k, v in values.items() if k in valid})
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:400]}
+    from .._sweep_words import cell_words
+    from .._catalog_lookup import split_option
+    from .krea2_lora import canon_trigger_mode
+    lora_cfg = plan.get("lora") or {}
+    trig_label = str(lora_cfg.get("triggers") or values.get("lora_triggers") or "")
+    trig = canon_trigger_mode(trig_label) if lora_cfg else "off"
+    keep_panel = bool(lora_cfg.get("keep_panel_stack"))
+    combos = plan.get("combos") or []
+    labels = plan.get("labels") or []
+    words_cache, rows, missing = {}, [], set()
+    for i, c in enumerate(combos[:PREVIEW_MAX_ROWS]):
+        loras, entries = [], []
+        if c.get("lora_baseline"):
+            loras.append("panel stack only (reference)" if keep_panel or lora_cfg.get("mode") == "strength_ladder"
+                         else "no LoRA (reference)")
+        elif "lora_stack" in c:
+            m = float(c.get("lora_mult") or 1.0)
+            if keep_panel:
+                loras.append("panel stack +")
+            for name, ws in parse_stack_line(c["lora_stack"]):
+                w = [x * m for x in ws]
+                wt = f"{w[0]:g}" if w[0] == w[1] == w[2] else "/".join(f"{x:g}" for x in w)
+                loras.append(f"{os.path.basename(str(name))} @{wt}")
+                base, option = split_option(name)
+                p = _preview_path(base)
+                if p:
+                    entries.append({"path": p, "filename": os.path.basename(p), "weight_s1": w[0],
+                                    "word_option": option})
+                else:
+                    missing.add(str(base))
+        elif "lora_file" in c:
+            if keep_panel:
+                loras.append("panel stack +")
+            loras.append(f"{os.path.basename(str(c['lora_file']))} @{float(c.get('lora_strength') or 1):g}")
+            base, option = split_option(c["lora_file"])
+            p = _preview_path(base)
+            if p:
+                entries.append({"path": p, "filename": os.path.basename(p),
+                                "weight_s1": float(c.get("lora_strength") or 1.0), "word_option": option})
+            else:
+                missing.add(str(base))
+        elif "lora_target" in c:
+            loras.append(f"panel stack, entry {c['lora_target']} @{float(c.get('lora_strength') or 1):g}")
+        prompt = str(c.get("prompt") if "prompt" in c else panel_prompt or "")
+        words, sources = [], []
+        if trig != "off" and entries:
+            key = (tuple(e["path"] for e in entries), tuple(e["weight_s1"] for e in entries),
+                   tuple(e.get("word_option") or "" for e in entries), prompt)
+            if key not in words_cache:
+                try:
+                    w, s, _r = cell_words(entries, trig, checkpoint, prompt)
+                    words_cache[key] = (w, s, (_r or {}).get("conflicts") or [])
+                except Exception as e:
+                    words_cache[key] = ([], [f"words lookup failed: {e}"], [])
+            words, sources, conflicts = words_cache[key]
+        else:
+            conflicts = []
+        settings = {k: v for k, v in c.items() if not str(k).startswith("_") and k not in
+                    ("prompt", "lora_stack", "lora_file", "lora_strength", "lora_baseline", "lora_target", "lora_mult")}
+        if "_seed" in c:
+            settings["seed"] = c["_seed"]
+        tags = __import__("re").findall(r"<lora:[^>]+>", prompt, __import__("re").I)
+        rows.append({"i": i, "label": labels[i] if i < len(labels) else "",
+                     "settings": ", ".join(f"{k}={v}" for k, v in settings.items()),
+                     "loras": loras, "words": ", ".join(words), "sources": sources, "conflicts": conflicts,
+                     "prompt": prompt[:220] + ("..." if len(prompt) > 220 else ""),
+                     "prompt_swept": "prompt" in c, "tags": tags})
+    notes = list(node._random_notes or [])
+    if missing:
+        notes.append("not found (the run will fail on these): " + ", ".join(sorted(missing)[:10]))
+    return {"ok": True, "cells": len(combos), "rows": rows, "truncated": len(combos) > PREVIEW_MAX_ROWS,
+            "lora_mode": lora_cfg.get("mode") or "none", "triggers": trig_label if lora_cfg else "",
+            "checkpoint": checkpoint or "", "notes": notes}
 
 
 def _validate(vals: list, allowed: list, name: str):
@@ -103,21 +431,22 @@ class EricKrea2SweepPlan:
             },
             "optional": {
                 "samplers": ("STRING", {"multiline": True,
-                    "default": ", ".join(_SAMPLERS),
+                    "default": "",
                     "tooltip": f"Comma/newline-separated. Allowed: {', '.join(_SAMPLERS)}. "
-                               f"Pre-populated with all of them - delete what you don't want. "
+                               f"Starts empty (2026-10-16); the preset 'All samplers + schedulers "
+                               f"(lists only)' fills in every option. "
                                f"Blank = not swept. Crossed with hybrid_steps, only the hybrid "
                                f"samplers expand per split value; other samplers keep one cell "
                                f"(inert-split dedupe)."}),
                 "schedulers": ("STRING", {"multiline": True,
-                    "default": _default_schedulers(),
+                    "default": "",
                     "tooltip": f"Built-in schedules AND saved sigma-shape ★ preset names, mixed "
                                f"freely: each entry is tried as a schedule "
                                f"({', '.join(_SCHEDULES)}) first, then as a sigmas preset "
                                f"(applied as a full profile for that cell); unknown names are "
                                f"SKIPPED with a console warning instead of aborting. "
-                               f"Pre-populated with everything available - delete what you "
-                               f"don't want. Blank = not swept."}),
+                               f"Starts empty; the preset 'All samplers + schedulers (lists only)' "
+                               f"fills in everything. Blank = not swept."}),
                 "pair_lock": ("BOOLEAN", {"default": False,
                     "tooltip": "ON: zip samplers+schedulers line-by-line into fixed pairs (lists must "
                                "be equal length) - for testing known recipes. OFF: full cross product."}),
@@ -169,9 +498,10 @@ class EricKrea2SweepPlan:
                     "tooltip": "Contact-sheet order. Metrics sort best-first; time_s fastest-first. "
                                "Manifest keeps plan order + this ordering separately."}),
                 "tile_px": ("INT", {"default": 448, "min": 128, "max": 1024, "step": 32}),
-                "max_combos": ("INT", {"default": 64, "min": 1, "max": 4096,
-                    "tooltip": "Hard cap. Over-cap plans REFUSE with an axis-size breakdown "
-                               "(no silent truncation)."}),
+                "max_combos": ("INT", {"default": 0, "min": 0, "max": 100000,
+                    "tooltip": "0 = no cap (default since 2026-10-15; the readout under the node shows the "
+                               "cell count as you edit). A number > 0 is a hard cap: over-cap plans REFUSE "
+                               "with an axis-size breakdown (no silent truncation)."}),
                 "output_folder": ("STRING", {"default": "",
                     "tooltip": "Where sweep folders are created. Blank = ComfyUI output/sweeps. "
                                "An absolute path is used as-is; a relative path is created "
@@ -192,49 +522,102 @@ class EricKrea2SweepPlan:
                                "does NOT override a swept megapixels value. Note: resolution "
                                "changes the noise grid, so composition shifts with size even at "
                                "a fixed seed - that is part of what you are measuring."}),
-                "lora_mode": (["none", "bakeoff", "strength_ladder"], {"default": "none",
+                "lora_mode": (["none", "bakeoff", "strength_ladder", "stacks"], {"default": "none",
                     "tooltip": "bakeoff: each LoRA in lora_files at each lora_strengths value - "
                                "by default the swept LoRA runs ALONE (panel stack replaced) so "
                                "every style is measured against the bare checkpoint; "
                                "keep_panel_stack layers it on top instead. strength_ladder: keep "
                                "the panel-declared stack, step ONLY the lora_target entry "
-                               "through lora_strengths. Sweep-injected entries are ephemeral "
-                               "(fused per cell, cleaned per cell)."}),
+                               "through lora_strengths. stacks: one whole stack per lora_files "
+                               "line ('comic @0.8 | V0id @0.6') to test LoRAs together. "
+                               "Sweep-injected entries are ephemeral (fused per cell, cleaned per cell)."}),
                 "lora_files": ("STRING", {"multiline": True, "default": "",
-                    "tooltip": "bakeoff: one LoRA per line - a name from the loras folder "
-                               "(same resolution as the LoRA Stack node) or a full path."}),
-                "lora_strengths": ("STRING", {"default": "",
+                    "tooltip": "bakeoff: one LoRA per line - a name from the loras folder (same resolution as the LoRA Stack node), a full path, or just the file name (found in any subfolder).\n"
+                               "stacks: one STACK per line, LoRAs separated by | , each 'name @weight' or 'name @s1/s2/s3' (no @ = the LoRA Catalog card weight, else 1.0), e.g.  comic_book_v2 @0.8 | V0id @0.6\n"
+                               "\n"
+                               "PICKS - 'random:' draws xN, 'all:' takes every one - from a folder or the LoRA Catalog:\n"
+                               "random: graphic-art x6   (a loras/Krea2 subfolder, a loras-folder path or a full path)\n"
+                               "random: graphic-art x4 @0.8 | V0id @0.6   (stacks: 4 stacks, a new pick each)\n"
+                               "Parkes | all: illustration   (stacks: Parkes with each other LoRA, once)\n"
+                               "cross: random: illustration x4 | random: graphic-arts x4   (stacks: every combination)\n"
+                               "random: catalog comic x4 | partner: best   (stacks: each pick + its best-rated "
+                               "partner from your stacks, else what Civitai users stack it with; partner: random = "
+                               "any of your good partners; @w and seed= work)\n"
+                               "random: catalog watercolor x4   (catalog: every word on the card - name, file, folder, kind, effect, facets, artists, triggers, creator)\n"
+                               "\n"
+                               "CATALOG FILTERS (combine freely): tag=\"art nouveau\"   creator=Adel_Ai (or author=; case, _ and - ignored)   kind=style_medium   role=style   arch=Krea2 (the default; Flux, Z_Image, Wan ... or any)\n"
+                               "e.g.  random: catalog creator=Adel_Ai tag=watercolor x4\n"
+                               "\n"
+                               "PER PROMPT (needs prompts; must be the only line): every prompt gets its OWN pick, paired instead of crossed with all prompts.\n"
+                               "bakeoff: random: catalog creator=Adel_Ai per prompt   (one LoRA per prompt; 'x2 per prompt' = two single-LoRA cells per prompt)\n"
+                               "stacks:  random: catalog creator=Adel_Ai x2 per prompt @0.8   (ONE stack of 2 per prompt; add '| V0id @0.6' for a fixed LoRA in every stack; one 'per prompt' anywhere in the line covers every random slot, e.g. 'random: comic | random: illustration per prompt'; include_baseline / stack_parts work within each prompt)\n"
+                               "\n"
+                               "SEEDS: none = the same picks every run; seed=7 = another repeatable draw; seed=new = a fresh draw every queue. Show plan lists the picks; every cell records them.\n"
+                               "WORD OPTIONS (card > Prompt words > Word options): 'name #option @0.8' = that option's words; 'name #each' = one cell per option; 'name #random' = one option drawn at random (repeatable; on a 'per prompt' line every pick draws its own).\n"
+                               "Lines starting with # are ignored."}),
+                "lora_strengths": ("STRING", {"default": "card",
                     "tooltip": "e.g. '0.6, 0.8, 1.0'. One value drives all three stage weights "
                                "(weight_s1=s2=s3). bakeoff: every file at every value; "
-                               "ladder: the target entry's values."}),
+                               "ladder: the target entry's values. stacks: optional multipliers - "
+                               "every stack (and every single-LoRA baseline) runs once per value, all "
+                               "its weights scaled (blank = the weights as written). "
+                               "bakeoff also takes card / card_low / card_high: each LoRA at its "
+                               "LoRA Catalog card weight (your editor weight wins; no card = 1.0), "
+                               "mixable with numbers, e.g. 'card, 1.0'."}),
                 "lora_target": ("STRING", {"default": "1",
                     "tooltip": "strength_ladder: which panel-stack entry to vary - 1-based "
                                "index, or a name substring (matches lora_name/filename)."}),
                 "include_baseline": ("BOOLEAN", {"default": True,
                     "tooltip": "Add one reference cell: bakeoff = no LoRA at all (or the panel "
                                "stack alone when keep_panel_stack is ON); ladder = the panel "
-                               "stack exactly as declared."}),
+                               "stack exactly as declared. stacks = that reference cell PLUS every "
+                               "distinct LoRA of the lines alone at its line weight, so each "
+                               "combination can be judged against its parts."}),
                 "keep_panel_stack": ("BOOLEAN", {"default": False,
-                    "tooltip": "bakeoff only: append the swept LoRA ON TOP of the panel stack "
-                               "instead of replacing it."}),
+                    "tooltip": "bakeoff and stacks: append the swept LoRA (or stack) ON TOP of the "
+                               "panel stack instead of replacing it."}),
                 "prompts": ("STRING", {"multiline": True, "default": "",
                     "tooltip": "One prompt per line = a prompt axis (slowest axis, so the sheet "
                                "and CSV read in prompt-major blocks). Each prompt cell re-encodes "
                                "(prompt_conditioning is cleared; ~seconds/cell). Metric "
-                               "comparisons are only meaningful WITHIN a prompt block."}),
+                               "comparisons are only meaningful WITHIN a prompt block.\n"
+                               "PROMPT FILES (one prompt per line; blank and # lines skipped):\n"
+                               "file: D:\\prompts\\portraits.txt   every prompt in the file (all: works too)\n"
+                               "random: D:\\prompts\\portraits.txt x20   20 different prompts drawn at random\n"
+                               "  seed=7 = another repeatable draw; seed=new = a fresh draw every queue\n"
+                               "A relative path starts from the ComfyUI folder. Mix freely with typed prompts. "
+                               "Every cell records the actual prompt text; editing the file rebuilds the plan."}),
                 "sigma_profiles": ("STRING", {"default": "",
                     "tooltip": "Comma/newline list of saved sigma-shape preset NAMES (the ★ "
                                "presets of the Eric Krea2 Sigmas node). Each cell rebuilds the "
                                "full bundle from that preset and it OVERRIDES any wired sigmas "
                                "node for that cell. Blank = not swept."}),
-                "lora_triggers": (["append", "prepend", "off"], {"default": "append",
-                    "tooltip": "bakeoff: merge each cell's swept-LoRA trigger words into that "
+                # 2026-10-16: none / trigger / full / saved pick appended (the JS shows only these four;
+                # off / catalog / recipe load as none / trigger / saved pick)
+                "lora_triggers": (["append", "prepend", "off", "catalog", "recipe",
+                                   "none", "trigger", "full", "saved pick"], {"default": "saved pick",
+                    "tooltip": "Words added to each cell's prompt for its swept LoRAs (bakeoff and stacks; "
+                               "baseline cells get none). Check them with 'Show plan' before you queue.\n"
+                               "none = nothing.\n"
+                               "trigger = each LoRA's main trigger from its card (can be a few words). Enough "
+                               "on the base model, often too weak on fine-tunes.\n"
+                               "full = each LoRA's whole recipe: official words + trigger + style phrase.\n"
+                               "saved pick = the words picked for the loaded checkpoint (yours, else a trigger "
+                               "test's), else trigger + style phrase. Best default.\n"
+                               "full and saved pick merge a stack's words into one tidy list. "
+                               "Details (older names): bakeoff and stacks: merge each cell's swept-LoRA trigger words into that "
                                "cell's prompt (from the LoRA Stack node's cached trigger "
                                "database; first-seen files may do one network lookup, "
                                "non-fatal on failure). Only sweep-injected entries contribute - "
                                "baseline and ladder cells are untouched. A cell whose prompt "
                                "text changes re-encodes automatically. Effective prompt + "
-                               "triggers are recorded in the cell's metadata."}),
+                               "triggers are recorded in the cell's metadata. catalog: ONE "
+                               "trigger per swept LoRA - its LoRA Catalog card's first active "
+                               "trigger (your priority ones first, switched-off ones never), else "
+                               "the first cached Civitai trigger - always PREPENDED (Krea 2 follows "
+                               "a leading trigger best). recipe (2026-10-15): each swept LoRA's LoRA "
+                               "Catalog prompt words for this checkpoint - your pick, else a trigger test's "
+                               "pick, else trigger + style phrase - prepended; an empty pick adds nothing."}),
                 "enabled": ("BOOLEAN", {"default": True,
                     "tooltip": "Off = the node outputs nothing and Ultra V2 runs a normal single "
                                "generation - leave the sweep wired in the workflow and toggle it."}),
@@ -248,6 +631,61 @@ class EricKrea2SweepPlan:
                     "tooltip": "One or two sentences: what this sweep preset is FOR and what it "
                                "does. Saved and loaded with the ★ preset - so future-you "
                                "remembers why it exists."}),
+                # appended LAST (2026-10-15): widget values are saved by position
+                "run_notes": ("STRING", {"multiline": True, "default": "",
+                    "tooltip": "Why you are running THIS sweep today (what you are checking, what "
+                               "changed since last time). Written into the sweep folder - "
+                               "sweep_manifest.json and sweep_info.txt - with the preset name and "
+                               "preset notes. Never saved into a preset, and typing here does not "
+                               "flip the preset dropdown to custom."}),
+                # appended LAST (2026-10-16): share sheets for Civitai / Reddit
+                "share_sheets": (["off", "strips", "strips + singles", "singles"], {"default": "strips",
+                    "tooltip": "After the sweep finishes, write ready-to-post JPEGs into <sweep>/share/. "
+                               "strips = one labelled strip per prompt (768 px tiles, wraps into more "
+                               "rows, max 6000 px a side), with the settings on top and each LoRA's short "
+                               "name, weight, creator and Civitai model number under its image. singles = "
+                               "each image with its own labels. To add star ratings, make them again from "
+                               "the catalog's Sweeps page after you rate."}),
+                "share_background": (["black", "white"], {"default": "black",
+                    "tooltip": "Background colour of the share sheets."}),
+                # appended LAST (2026-10-16): what include_baseline adds next to each stack
+                "stack_parts": (["each LoRA alone", "reference only", "build up", "leave one out"],
+                                {"default": "each LoRA alone",
+                    "tooltip": "stacks mode with include_baseline ON - the cells added next to the stacks:\n"
+                               "each LoRA alone: the no-LoRA reference + every LoRA of the lines alone (as before).\n"
+                               "reference only: just the no-LoRA reference - screen many stacks fast, e.g. "
+                               "'cross: random: illustration x4 | random: graphic-arts x4 | random: treatment x4' "
+                               "= 64 stacks + 1 reference.\n"
+                               "build up: the reference, then each stack one LoRA at a time in the order written: "
+                               "A, A+B, A+B+C - what each layer adds.\n"
+                               "leave one out: the reference + each stack minus one LoRA at a time (A+B, A+C, "
+                               "B+C) - which LoRA a stack can do without.\n"
+                               "Repeated cells are made once. include_baseline OFF = no extra cells at all."}),
+                # appended LAST (2026-10-22): SDE band + churn form axes
+                "sde_bands": ("STRING", {"default": "",
+                    "tooltip": "Sweep the SDE band as 'hi-lo' sigma pairs, e.g. '1-0, 0.93-0.44, 1-0.5, "
+                               "0.5-0.15' -> <stage>_sde_hi / <stage>_sde_lo for the scoped stage(s). Churn "
+                               "only happens on steps whose next sigma is inside the band, so pair with eta > 0 "
+                               "(etas axis or panel). Cells where the band is inert (euler / lcm / er_sde, or an "
+                               "explicit eta of 0) are deduped. Blank = not swept."}),
+                "churn_forms": ("STRING", {"default": "",
+                    "tooltip": "Sweep the churn form: 've, rf' -> churn_form (all stages). ve = previous noise "
+                               "injection, rf = rectified-flow form. eta values mean different things in the two "
+                               "forms, so cross with an etas axis. Blank = not swept."}),
+                # appended LAST (2026-10-23): hybrid handoff by sigma
+                "hybrid_handoffs": ("STRING", {"default": "",
+                    "tooltip": "Sweep the lcm-hybrid handoff in sigma, e.g. '0.8, 0.7, 0.6, 0.5' -> "
+                               "<stage>_hybrid_handoff for the scoped stage(s). The lcm head runs until the "
+                               "ladder reaches that sigma (first step at or below it). Overrides "
+                               "hybrid_steps for those cells; inert on non-hybrid samplers (deduped). "
+                               "Blank = not swept."}),
+                # appended LAST (2026-10-29) - TEMPORARY test axis, remove after the comma-vs-period test
+                "trigger_joins": ("STRING", {"default": "",
+                    "tooltip": "TEST AXIS (temporary): 'comma, period' - how the swept LoRAs' trigger words join the "
+                               "prompt (comma = 'trigA, trigB, prompt'; period = 'trigA. trigB. Prompt'). Needs "
+                               "lora_mode bakeoff or stacks with lora_triggers on; baseline cells are deduped. Only "
+                               "the swept LoRAs' words - an upstream stack's words were already joined by its own "
+                               "trigger_join. Blank = not swept."}),
             },
         }
 
@@ -256,7 +694,19 @@ class EricKrea2SweepPlan:
     FUNCTION = "build"
     CATEGORY = "Eric/Krea2"
 
-    def build(self, enabled=True, sweep_preset="custom", **kwargs):
+    @classmethod
+    def IS_CHANGED(cls, lora_files="", prompts="", **_kwargs):
+        # 'random: ... seed=new' must draw again on every queue (2026-10-15); otherwise the
+        # normal cache applies (the same text = the same picks anyway). Prompt files (2026-10-26):
+        # seed=new draws again too, and an edited file rebuilds the plan (its mtime is the key).
+        from .._lora_names import is_fresh_draw
+        from .._prompt_lines import files_signature
+        if is_fresh_draw(lora_files) or is_fresh_draw(prompts):
+            return float("nan")
+        return files_signature(prompts)
+
+    def build(self, enabled=True, sweep_preset="custom", run_notes="", share_sheets="strips",
+              share_background="black", **kwargs):
         """Wrapper: sweep on/off toggle + named sweep presets.
 
         enabled=False -> returns (None,): Ultra V2's sweep input treats None
@@ -297,17 +747,36 @@ class EricKrea2SweepPlan:
             else:
                 print(f"[EricKrea2-Sweep] WARNING: sweep preset '{sweep_preset}' not found "
                       f"or empty - widgets rule for this run")
-        return self._build(**kwargs)
+        self._random_notes = []
+        (plan,) = self._build(**kwargs)
+        # what was run and why (2026-10-15): lands in sweep_manifest.json ("about") and sweep_info.txt
+        if isinstance(plan, dict):
+            plan["meta"] = {"sweep_preset": str(sweep_preset or "custom"),
+                            "preset_notes": str(kwargs.get("preset_notes") or "").strip(),
+                            "run_notes": str(run_notes or "").strip()}
+            if self._random_notes:
+                plan["meta"]["random_loras"] = "\n".join(self._random_notes)
+            # a preset loaded and then edited shows as 'custom': say which preset it came from (2026-10-15)
+            if str(sweep_preset or "custom") == "custom" and kwargs:
+                based, edited = _closest_preset(kwargs)
+                if based:
+                    plan["meta"]["based_on"] = based
+                    plan["meta"]["edited_fields"] = edited
+            from .._sweep_files import sweep_name
+            plan["meta"]["sweep_name"] = sweep_name(plan["meta"])
+            plan["share"] = {"mode": str(share_sheets or "off"), "background": str(share_background or "black")}
+        return (plan,)
 
     def _build(self, mode="grid", stage_scope="s1", samplers="", schedulers="", pair_lock=False,
               steps="", windows="", etas="", noise_types="", cfgs="", shift_modes="", mus="",
               combos_json="", combos_file="", seed_policy="fixed", seeds="", quick_screen=False,
               screen_megapixels=1.0, score_metrics=True, sort_by="plan_order",
-              tile_px=448, max_combos=64, output_folder="", megapixels="", hybrid_steps="",
+              tile_px=448, max_combos=0, output_folder="", megapixels="", hybrid_steps="",
               preset_notes="",
-              lora_mode="none", lora_files="", lora_strengths="", lora_target="1",
+              lora_mode="none", lora_files="", lora_strengths="card", lora_target="1",
               include_baseline=True, keep_panel_stack=False, prompts="", sigma_profiles="",
-              lora_triggers="append"):
+              lora_triggers="saved pick", stack_parts="each LoRA alone",
+              sde_bands="", churn_forms="", hybrid_handoffs="", trigger_joins=""):
         from .._sweep_core import expand_grid, diff_label
         stages = _STAGES[stage_scope]
 
@@ -315,7 +784,9 @@ class EricKrea2SweepPlan:
         # FIRST axis the slowest, so prompts -> profile -> lora lead, giving
         # prompt-major (then profile-major) blocks on the sheet and CSV.
         lead_axes = {}
-        pl = [ln.strip() for ln in str(prompts or "").splitlines() if ln.strip()]
+        # file: / random: prompt files (2026-10-26) - typed prompts work as before
+        from .._prompt_lines import expand_prompt_lines
+        pl = expand_prompt_lines(prompts, getattr(self, "_random_notes", None))
         if pl:
             lead_axes["prompt"] = [{"prompt": s} for s in pl]
         sp = _split(sigma_profiles)
@@ -331,24 +802,124 @@ class EricKrea2SweepPlan:
             except ImportError:
                 pass
             lead_axes["sigma_profile"] = [{"sigma_profile": s} for s in sp]
+        _pp = None                       # 'per prompt' LoRA picks (2026-10-26)
         if lora_mode != "none":
-            sv = _floats(lora_strengths, "lora_strengths")
+            sv = _strengths(lora_strengths, lora_mode)
             vals = []
             if include_baseline:
                 vals.append({"lora_baseline": True})
             if lora_mode == "bakeoff":
-                files = [ln.strip() for ln in str(lora_files or "").splitlines() if ln.strip()]
+                from .._lora_names import clean_lines, expand_random_bakeoff, per_prompt_picks
+                notes = getattr(self, "_random_notes", [])
+                # '#' lines were not skipped here before (2026-10-15 fix - the tooltip said they were)
+                _lines = clean_lines(lora_files)
+                # 'per prompt' (2026-10-26): each prompt its own pick(s), paired with it - not crossed
+                _pp = per_prompt_picks(_lines, len(lead_axes.get("prompt", [])), notes)
+                if _pp is not None:
+                    _pp = [_expand_each(g, notes, stacks=False) for g in _pp]
+                    files = list(dict.fromkeys(f for g in _pp for f in g))
+                else:
+                    files = expand_random_bakeoff(_lines, notes)
+                    files = _expand_each(files, notes, stacks=False)      # 'name #each' (2026-10-20)
+                for n in notes:
+                    print(f"[EricKrea2-Sweep] random LoRA {n}")
                 if not files:
                     raise ValueError("SweepPlan: lora_mode=bakeoff but lora_files is empty")
                 if not sv:
                     raise ValueError("SweepPlan: lora_mode=bakeoff but lora_strengths is empty")
-                vals += [{"lora_file": f, "lora_strength": s} for f in files for s in sv]
+                card_notes = []
+                vals += [{"lora_file": f, "lora_strength": s}
+                         for f in files for s in _card_strengths(f, sv, card_notes)]
+                if card_notes:
+                    print("[EricKrea2-Sweep] card weights: " + "; ".join(card_notes))
+            elif lora_mode == "stacks":
+                # Cell value = the canonical line text (readable caption / CSV / filename);
+                # Ultra V2 parses it again to build the stack. Baselines: each distinct LoRA
+                # alone at its line weight, before the stacks; duplicates dropped.
+                from .._lora_names import clean_lines, expand_random_stacks, per_prompt_stacks, resolve_partners
+                notes = getattr(self, "_random_notes", [])
+                _ppl = clean_lines(lora_files)
+                # 'per prompt' (2026-10-26): ONE stack per prompt line, paired with it - not crossed
+                _pps = per_prompt_stacks(_ppl, len(lead_axes.get("prompt", [])), notes)
+                if _pps is not None:
+                    _pp_lines = [_expand_each(resolve_partners([ln], notes, salt=k), notes, stacks=True)
+                                 for k, ln in enumerate(_pps)]
+                    lines = list(dict.fromkeys(ln for g in _pp_lines for ln in g))
+                else:
+                    lines = resolve_partners(expand_random_stacks(_ppl, notes), notes)   # 'partner:' (2026-10-27)
+                    lines = _expand_each(lines, notes, stacks=True)       # 'name #each' (2026-10-20)
+                for n in notes:
+                    print(f"[EricKrea2-Sweep] random LoRA {n}")
+                if not lines:
+                    raise ValueError("SweepPlan: lora_mode=stacks but lora_files is empty "
+                                     "(one stack per line: 'name @0.8 | other @0.6')")
+                weight_notes = []
+                stacks = [parse_stack_line(ln, card_weights=True, notes=weight_notes) for ln in lines]
+                if weight_notes:
+                    print("[EricKrea2-Sweep] stacks, no weight written -> card weight: "
+                          + "; ".join(dict.fromkeys(weight_notes)))
+                texts = []
+                parts_mode = str(stack_parts or "each LoRA alone")
+                if not include_baseline or parts_mode == "reference only":
+                    texts += [format_stack(st) for st in stacks]
+                elif parts_mode == "build up":           # A, A+B, A+B+C next to each other (2026-10-16)
+                    for st in stacks:
+                        texts += [format_stack(st[:k]) for k in range(1, len(st) + 1)]
+                elif parts_mode == "leave one out":      # A+B, A+C, B+C, then A+B+C (2026-10-16)
+                    for st in stacks:
+                        if len(st) > 1:
+                            texts += [format_stack(st[:k] + st[k + 1:]) for k in range(len(st))]
+                        texts.append(format_stack(st))
+                else:                                    # each LoRA alone, before the stacks (as before)
+                    texts += [format_stack([e]) for st in stacks for e in st]
+                    texts += [format_stack(st) for st in stacks]
+                seen_stacks = set()
+                for text in texts:
+                    if text.lower() in seen_stacks:
+                        continue
+                    seen_stacks.add(text.lower())
+                    if sv:
+                        vals += [{"lora_stack": text, "lora_mult": m} for m in sv]
+                    else:
+                        vals.append({"lora_stack": text})
+                if _pps is not None:          # which stack cells belong to which prompt (2026-10-26)
+                    _pp = []
+                    for grp in _pp_lines:
+                        sts = [parse_stack_line(ln, card_weights=True, notes=[]) for ln in grp]
+                        mine = set()
+                        if not include_baseline or parts_mode == "reference only":
+                            mine |= {format_stack(st) for st in sts}
+                        elif parts_mode == "build up":
+                            for st in sts:
+                                mine |= {format_stack(st[:k]) for k in range(1, len(st) + 1)}
+                        elif parts_mode == "leave one out":
+                            for st in sts:
+                                if len(st) > 1:
+                                    mine |= {format_stack(st[:k] + st[k + 1:]) for k in range(len(st))}
+                                mine.add(format_stack(st))
+                        else:
+                            mine |= {format_stack([e]) for st in sts for e in st}
+                            mine |= {format_stack(st) for st in sts}
+                        _pp.append(mine)
             else:  # strength_ladder
                 if not sv:
                     raise ValueError("SweepPlan: strength_ladder needs lora_strengths")
                 tgt = str(lora_target or "1").strip()
                 vals += [{"lora_strength": s, "lora_target": tgt} for s in sv]
-            lead_axes["lora"] = vals
+            if _pp is not None:
+                # 'per prompt' (2026-10-26): prompt k with ITS picks only (plus the baseline cell) - one
+                # paired axis, still the slowest, so the sheet reads in prompt blocks as before.
+                _base = [v for v in vals if v.get("lora_baseline")]
+                _paired = []
+                for k, pv in enumerate(lead_axes.pop("prompt")):
+                    mine = {str(f).lower() for f in _pp[k]}
+                    _paired += [dict(pv, **b) for b in _base]
+                    _paired += [dict(pv, **v) for v in vals
+                                if not v.get("lora_baseline")
+                                and str(v.get("lora_file") or v.get("lora_stack") or "").lower() in mine]
+                lead_axes = {"prompt": _paired, **lead_axes}
+            else:
+                lead_axes["lora"] = vals
 
         def per_stage(key_suffix, value):
             return {f"{st}_{key_suffix}": value for st in stages}
@@ -463,6 +1034,41 @@ class EricKrea2SweepPlan:
                     raise ValueError(f"SweepPlan: hybrid_steps out of range (0-98; "
                                      f"0 = auto half, like the Ultra widget): {bad}")
                 axes["hybrid_steps"] = [per_stage("hybrid_steps", v) for v in hs]
+            if str(sde_bands or "").strip():           # 2026-10-22
+                bvals = []
+                for t in _split(sde_bands):
+                    try:
+                        a, b = (float(u) for u in t.split("-"))
+                    except Exception:
+                        raise ValueError(f"SweepPlan: sde band '{t}' must be 'hi-lo' sigmas, e.g. '0.93-0.44'")
+                    hi, lo = max(a, b), min(a, b)
+                    if not (0.0 <= lo <= hi <= 1.0):
+                        raise ValueError(f"SweepPlan: sde band '{t}' must lie within 0-1")
+                    bvals.append(dict(per_stage("sde_hi", hi), **per_stage("sde_lo", lo)))
+                axes["sde_band"] = bvals
+            if str(churn_forms or "").strip():
+                cf = [v.lower() for v in _split(churn_forms)]
+                _validate(cf, ["ve", "rf"], "churn_form(s)")
+                axes["churn_form"] = [{"churn_form": v} for v in cf]
+            if str(hybrid_handoffs or "").strip():     # 2026-10-23
+                hvals = []
+                for t in _split(hybrid_handoffs):
+                    try:
+                        v = float(t)
+                    except Exception:
+                        raise ValueError(f"SweepPlan: hybrid handoff '{t}' must be a sigma, e.g. 0.6")
+                    if not (0.0 <= v <= 1.0):
+                        raise ValueError(f"SweepPlan: hybrid handoff '{t}' must lie within 0-1")
+                    hvals.append(per_stage("hybrid_handoff", v))
+                axes["hybrid_handoff"] = hvals
+            if str(trigger_joins or "").strip():       # TEMPORARY test axis (2026-10-29)
+                tj = [v.lower() for v in _split(trigger_joins)]
+                _validate(tj, ["comma", "period"], "trigger_join(s)")
+                if lora_mode not in ("bakeoff", "stacks") or str(lora_triggers).lower() in ("off", "none"):
+                    print("[EricKrea2-Sweep] trigger_joins: no effect without lora_mode bakeoff/stacks and "
+                          "lora_triggers on - axis ignored")
+                else:
+                    axes["trigger_join"] = [{"trigger_join": v} for v in tj]
             if megapixels.strip():
                 mps = _floats(megapixels, "megapixels")
                 bad = [v for v in mps if not (0.1 <= v <= 16)]
@@ -493,7 +1099,7 @@ class EricKrea2SweepPlan:
             n = 1
             for v in axes.values():
                 n *= len(v)
-            if n > max_combos:
+            if max_combos and n > max_combos:          # 0 = no cap (2026-10-15)
                 sizes = ", ".join(f"{k}={len(v)}" for k, v in axes.items())
                 raise ValueError(f"SweepPlan: {n} combos exceeds max_combos={max_combos} "
                                  f"(axes: {sizes}). Trim an axis or raise the cap deliberately.")
@@ -526,6 +1132,18 @@ class EricKrea2SweepPlan:
                 # live - it shapes the churn - so only eta is dropped.
                 if str(d.get(f"{st}_sampler", "")) == "er_sde":
                     d.pop(f"{st}_eta", None)
+                # SDE band (2026-10-22): inert where there is no eta churn to gate.
+                if (str(d.get(f"{st}_sampler", "")) in ("euler", "lcm", "er_sde")
+                        or d.get(f"{st}_eta", None) == 0):
+                    d.pop(f"{st}_sde_hi", None)
+                    d.pop(f"{st}_sde_lo", None)
+                # hybrid handoff (2026-10-23): inert on non-hybrid samplers; when set > 0 the
+                # stage's hybrid_steps is inert (the handoff decides the split).
+                _smp = str(d.get(f"{st}_sampler", ""))
+                if _smp and not _smp.startswith("lcm_hybrid"):
+                    d.pop(f"{st}_hybrid_handoff", None)
+                elif float(d.get(f"{st}_hybrid_handoff", 0) or 0) > 0:
+                    d.pop(f"{st}_hybrid_steps", None)
             # Per-stage hybrid steps: only the hybrids read them. If a cell
             # explicitly sets that stage's sampler to a non-hybrid, that
             # stage's hybrid_steps key is inert for the cell. (No explicit
@@ -534,6 +1152,20 @@ class EricKrea2SweepPlan:
                 sm = d.get(f"{st}_sampler")
                 if sm is not None and not str(sm).startswith("lcm_hybrid"):
                     d.pop(f"{st}_hybrid_steps", None)
+            if d.get("lora_baseline"):                 # no swept LoRA = no swept trigger words to join
+                d.pop("trigger_join", None)
+            # churn_form (2026-10-24): inert when no stage that runs adds eta churn. quick_screen
+            # runs Stage 1 only; otherwise every stage must be explicitly churn-free in the cell
+            # (a panel eta on an unswept stage would still use the form).
+            if "churn_form" in d:
+                _run = ("s1",) if quick_screen else ("s1", "s2", "s3")
+
+                def _no_churn(st):
+                    smp = str(c.get(f"{st}_sampler", ""))
+                    return smp in ("euler", "lcm", "er_sde") or c.get(f"{st}_eta", None) == 0
+
+                if all(_no_churn(st) for st in _run):
+                    d.pop("churn_form", None)
             return json.dumps(d, sort_keys=True)
         _seen, _unique = set(), []
         for c in combos:
@@ -553,12 +1185,24 @@ class EricKrea2SweepPlan:
             print(f"[EricKrea2-Sweep] removed {len(combos) - len(_unique)} inert duplicate "
                   f"cell(s) (eta/noise have no effect for euler and lcm)")
         combos = _unique
-        if len(combos) > max_combos:
-            raise ValueError(f"SweepPlan: {len(combos)} combos exceeds max_combos={max_combos}")
+        if max_combos and len(combos) > max_combos:
+            raise ValueError(f"SweepPlan: {len(combos)} combos exceeds max_combos={max_combos} "
+                             f"(0 = no cap)")
+        # combos carrying LoRA cells with lora_mode 'none' (2026-10-13): give the plan a lora section so Ultra V2
+        # applies them (it ignores LoRA keys without one) - stacks if any combo has lora_stack, else bakeoff.
+        eff_lora_mode = lora_mode
+        if lora_mode == "none" and mode == "combos":
+            if any("lora_stack" in c for c in combos):
+                eff_lora_mode = "stacks"
+            elif any("lora_file" in c or "lora_baseline" in c for c in combos):
+                eff_lora_mode = "bakeoff"
+            if eff_lora_mode != "none":
+                print(f"[EricKrea2-Sweep] combos carry LoRA cells: applied as {eff_lora_mode} "
+                      f"(triggers: {lora_triggers})")
         plan = {"version": 2, "mode": mode, "stage_scope": stage_scope,
-                "lora": ({"mode": lora_mode, "keep_panel_stack": bool(keep_panel_stack),
+                "lora": ({"mode": eff_lora_mode, "keep_panel_stack": bool(keep_panel_stack),
                           "triggers": str(lora_triggers)}
-                         if lora_mode != "none" else None),
+                         if eff_lora_mode != "none" else None),
                 "combos": combos, "labels": [diff_label(c) for c in combos],
                 "seed_policy": seed_policy, "quick_screen": bool(quick_screen),
                 "screen_megapixels": float(screen_megapixels),
@@ -604,6 +1248,8 @@ class EricKrea2SweepToPreset:
              objective="", append_checkpoint=True):
         if not str(manifest_path).strip():
             raise ValueError("SweepToPreset: manifest_path is empty")
+        from .._sweep_files import manifest_path as _find_manifest
+        manifest_path = _find_manifest(manifest_path)      # a sweep folder works too (2026-10-15)
         with open(manifest_path, "r", encoding="utf-8") as f:
             man = json.load(f)
         cell = next((c for c in man.get("cells", []) if c.get("index") == int(cell_index)), None)
@@ -817,7 +1463,8 @@ class EricKrea2SweepAutoPick:
     # ---- main --------------------------------------------------------------
     def pick(self, manifest_path, objective, metric="", tolerance=0.25,
              reference_cell=-1, external_csv="", external_higher_is_better=True):
-        mp = str(manifest_path or "").strip().strip('"')
+        from .._sweep_files import manifest_path as _find_manifest
+        mp = _find_manifest(manifest_path)                  # a sweep folder works too (2026-10-15)
         if not mp or not os.path.isfile(mp):
             raise ValueError(f"SweepAutoPick: manifest not found: '{mp}'")
         with open(mp, "r", encoding="utf-8") as f:

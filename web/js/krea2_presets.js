@@ -27,7 +27,7 @@ const PRESET_NODES = {
     },
     EricKrea2MultiLoRA: {
         section: "lora", presetWidget: "lora_preset",
-        skip: ["control_after_generate", "lora_preset"],
+        skip: ["control_after_generate", "lora_preset", "paste_lora"],
     },
     EricKrea2Sigmas: {
         section: "sigmas", presetWidget: "sigmas_preset",
@@ -35,7 +35,9 @@ const PRESET_NODES = {
     },
     EricKrea2SweepPlan: {
         section: "sweep", presetWidget: "sweep_preset",
-        skip: ["control_after_generate", "sweep_preset", "enabled"],
+        // run_notes (2026-10-15): per run, never part of a preset, and editing it keeps the preset name
+        skip: ["control_after_generate", "sweep_preset", "enabled", "run_notes", "sweep_cell_count", "clear_sweep", "show_plan",
+               "share_sheets", "share_background"],
     },
     EricKrea2ApplyLoRA: {
         section: "apply_lora", presetWidget: "apply_lora_preset",
@@ -49,6 +51,27 @@ const PRESET_NODES = {
 
 function findWidget(node, name) {
     return (node.widgets || []).find((w) => w.name === name);
+}
+
+// 2026-10-23: the frontend also fires widget callbacks WITHOUT a real edit (queueing,
+// focus/blur, node selection...). The dropdown only flips to "custom" when a widget's
+// value actually differs from what the preset (or the loaded workflow) set.
+function sameVal(a, b) {
+    if (typeof a === "number" && typeof b === "number") {
+        return Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(a), Math.abs(b));
+    }
+    return String(a) === String(b);
+}
+
+function snapshot(node, cfg) {
+    const skip = new Set(cfg.skip);
+    const base = {};
+    for (const w of node.widgets || []) {
+        if (!w || !w.name || w.type === "button") continue;
+        if (w.name === cfg.presetWidget || skip.has(w.name)) continue;
+        base[w.name] = w.value;
+    }
+    node.__krea2_baseline = base;
 }
 
 // Selecting a preset writes its values into this node's widgets (so the panel
@@ -70,12 +93,25 @@ function wireLoad(node, cfg) {
         w.callback = function (v, ...a) {
             const r = origW ? origW.call(this, v, ...a) : undefined;
             if (!node.__krea2_applying && pw.value !== "custom") {
+                const base = node.__krea2_baseline;
+                if (base && (w.name in base) && sameVal(w.value, base[w.name])) return r;  // no real edit
+                console.log(`[Eric_Krea2] '${w.name}' changed (${base ? base[w.name] : "?"} -> ${w.value}): ` +
+                            `preset '${pw.value}' -> custom`);
                 pw.value = "custom";
+                node.__krea2_baseline = null;
                 node.setDirtyCanvas(true, true);
             }
             return r;
         };
     }
+
+    // A workflow loaded with a preset name showing: its saved values are the baseline.
+    const origConfigure = node.onConfigure;
+    node.onConfigure = function () {
+        const r = origConfigure ? origConfigure.apply(this, arguments) : undefined;
+        try { if (pw.value && pw.value !== "custom") snapshot(node, cfg); } catch (_e) { /* ignore */ }
+        return r;
+    };
 
     const origCallback = pw.callback;
     pw.callback = async function (value, ...rest) {
@@ -111,6 +147,7 @@ function wireLoad(node, cfg) {
                 node.__krea2_applying = false;
             }
             pw.value = value; // keep the dropdown showing the loaded name
+            snapshot(node, cfg);
             node.setDirtyCanvas(true, true);
             console.log(`[Eric_Krea2] preset '${value}': applied ${applied} field(s) to the panel.`);
         } catch (e) {
@@ -123,7 +160,7 @@ function wireLoad(node, cfg) {
 // ★ Save Preset: collect current widget values (minus skip) and POST them.
 function wireSave(node, cfg) {
     const skip = new Set(cfg.skip);
-    node.addWidget("button", "★ Save Preset", null, async () => {
+    const sb = node.addWidget("button", "★ Save Preset", null, async () => {
         const data = {};
         for (const w of node.widgets || []) {
             if (!w || w.type === "button") continue;
@@ -156,6 +193,9 @@ function wireSave(node, cfg) {
             alert(`Save failed: ${e && e.message ? e.message : e}`);
         }
     });
+    // 2026-10-23: a button has no value to save - without this it took a slot in the
+    // workflow's positional widget values and blanked the next widget appended in Python.
+    if (sb) sb.serialize = false;
 }
 
 app.registerExtension({

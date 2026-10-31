@@ -157,6 +157,14 @@ def short_label(overrides: dict) -> str:
             rest.append(f"seed {vs}")
         elif k == "sigma_profile":
             rest.append(f"\u2605{vs}")
+        elif k == "lora_stack":       # stacks mode: 'a @0.8 | b @0.6' -> 'a @0.8 + b @0.6'
+            rest.append(vs.replace(" | ", " + "))
+        elif k == "churn_form":
+            rest.append(vs)
+        elif k == "trigger_join":                       # temporary test axis (2026-10-29)
+            rest.append("join " + vs)
+        elif k == "lora_mult":
+            rest.append("x" + vs)
         elif k == "prompt":
             rest.append("prompt: " + (vs[:34] + "\u2026" if len(vs) > 35 else vs))
         else:
@@ -178,6 +186,10 @@ def short_label(overrides: dict) -> str:
             bits.append(f"w{t.pop('start_step', '?')}-{t.pop('end_step', '?')}")
         if "hybrid_steps" in t:
             bits.append("h" + t.pop("hybrid_steps"))
+        if "hybrid_handoff" in t:
+            bits.append("hs" + t.pop("hybrid_handoff"))
+        if "sde_hi" in t or "sde_lo" in t:
+            bits.append(f"b{t.pop('sde_hi', '1')}-{t.pop('sde_lo', '0')}")
         if "eta" in t:
             bits.append("e" + t.pop("eta"))
         if "cfg" in t:
@@ -312,7 +324,14 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
     combos = list(plan.get("combos", []))
     labels = plan.get("labels") or [diff_label(c) for c in combos]
     n = len(combos)
-    sweep_id = time.strftime("%Y%m%d_%H%M%S") + "_" + _slug(checkpoint_name)
+    try:
+        from . import _sweep_files as _sf
+    except ImportError:
+        import _sweep_files as _sf
+    # the sweep's name (preset / custom / '<preset>-edited') in the folder and file names (2026-10-15)
+    sweep_name = _sf.sweep_name(plan.get("meta") or {})
+    files = _sf.file_names(sweep_name)
+    sweep_id = time.strftime("%Y%m%d_%H%M%S") + "_" + sweep_name + "_" + _slug(checkpoint_name)
     sweep_dir = os.path.join(out_root, sweep_id)
     os.makedirs(sweep_dir, exist_ok=True)
 
@@ -339,7 +358,9 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
             if "s1_megapixels" not in ov:  # a swept megapixels axis wins
                 eff["s1_megapixels"] = screen_mp
         seed = int(seeds[i]) if i < len(seeds) else int(base_seed)
-        if plan.get("seed_policy") == "seeds_axis" and "_seed" in ov:
+        # 2026-10-25: a cell that carries its own seed (seeds axis OR a hand-written combos line)
+        # always gets it - never passed through to the engine as an unknown "_seed" kwarg.
+        if "_seed" in ov:
             seed = int(eff.pop("_seed"))
         eff.pop("_coerced_noise", None)
         eff["seed"] = seed
@@ -464,25 +485,35 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
                 "sweep_id": sweep_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "checkpoint": checkpoint_name, "incomplete": incomplete,
                 "total_s": round(time.time() - t_sweep, 1),
+                # what was run and why (2026-10-15): sweep_preset, preset_notes, run_notes from the SweepPlan node
+                "about": dict(plan.get("meta") or {}),
+                "sweep_name": sweep_name, "files": files,
                 "plan": {k: v for k, v in plan.items() if k != "combos"},
                 "n_planned": n, "sort_by": sort_by, "order": order,
                 "base": resolve_values({}), "cells": results}
-    manifest_path = os.path.join(sweep_dir, "sweep_manifest.json")
+    manifest_path = os.path.join(sweep_dir, files["manifest"])
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
     # Human-readable summary table (opens straight into a spreadsheet). One row
     # per cell: what varied, per-cell generation time, rounded scores.
     swept_cols = sorted({k for r in results for k in r.get("overrides", {})})
-    with open(os.path.join(sweep_dir, "sweep_summary.csv"), "w", newline="",
+    # the LoRAs each cell actually ran (host-supplied 'loras'), swept or not (2026-10-15)
+    lora_col = ["loras"] if any(r.get("loras") for r in results) else []
+    # trajectory-probe summaries (2026-10-22): any scalar host field named probe_*
+    probe_cols = sorted({k for r in results for k, v in r.items()
+                         if str(k).startswith("probe_") and isinstance(v, (int, float))})
+    with open(os.path.join(sweep_dir, files["summary"]), "w", newline="",
               encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["cell", "file", "gen_time_s"] + swept_cols
+        w.writerow(["cell", "file", "gen_time_s"] + swept_cols + lora_col + probe_cols
                    + ["sharp_lap", "sharp_ten", "noise", "splotch", "clip_pct",
                       "uniqueness", "s1_reused", "error"])
         for r in results:
             m = r.get("metrics") or {}
             w.writerow([r["index"], r.get("file", ""), r.get("time_s", "")]
                        + [r.get("overrides", {}).get(k, "") for k in swept_cols]
+                       + [" | ".join(str(r.get("loras") or "").splitlines()) for _c in lora_col]
+                       + [r.get(k, "") for k in probe_cols]
                        + [round(m["sharpness_laplacian"]) if m else "",
                           round(m["sharpness_tenengrad"]) if m else "",
                           round(m.get("noise_sigma", 0), 1) if m else "",
@@ -490,8 +521,18 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
                           round(100 * m.get("clip_fraction", 0), 2) if m else "",
                           m.get("uniqueness", ""),
                           r.get("s1_reused", ""), r.get("error", "")])
+    # sweep_info.txt + sweep_review.xlsx (2026-10-15); never fails the sweep
+    try:
+        try:
+            from ._sweep_review import write_all as _write_extras
+        except ImportError:
+            from _sweep_review import write_all as _write_extras
+        _write_extras(sweep_dir, manifest, log=log)
+    except Exception as _e:
+        log(f"[sweep] sweep_info / review not written: {_e}")
     log(f"[sweep] {sweep_dir}: {len([r for r in results if 'file' in r])}/{n} ok, "
-        f"manifest + contact sheet written ({manifest['total_s']}s)")
+        f"{files['manifest']}, contact sheet, {files['info']} and {files['review']} written "
+        f"({manifest['total_s']}s)")
     if interrupted is not None:
         raise interrupted
     return {"cells": cells, "results": results, "sheet": sheet,
