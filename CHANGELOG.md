@@ -3,6 +3,33 @@
 All notable changes to Eric_Krea2 are documented here. Format loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.7.0
+
+### Added - hybrid handoff, sweep sheets & trajectory probe
+- **New `Eric Krea2 Hybrid Handoff` node (`nodes/krea2_hybrid_handoff.py`)** -
+  sigma-based stage handoff so a coarse pass can hand its latent/noise state to
+  a refinement pass at a chosen sigma, with accompanying spec
+  (`docs/spec_hybrid_handoff_sigma_2026-10-23.md`).
+- **New `Eric Krea2 Sweep Sheets` node (`nodes/krea2_sweep_sheets.py`)** plus
+  `_sweep_sheets.py` for contact-sheet style sweep output.
+- **New `Eric Krea2 Prompt LoRA Tags` node (`nodes/krea2_prompt_lora_tags.py`)**
+  for inline LoRA tag parsing/merging in prompts.
+- **Trajectory probe (`_traj_probe.py`)** and SDE-band support, with spec
+  `docs/spec_sde_band_and_trajectory_probe_2026-10-22.md`.
+
+### Changed - sweep system, LoRA tooling & docs
+- **Sweep core refactor** split into `_sweep_core.py`, `_sweep_files.py`,
+  `_sweep_review.py`, and `_sweep_words.py`; new web UI modules
+  (`krea2_sweep_active.js`, `krea2_sweep_count.js`, `krea2_trigger_modes.js`,
+  `krea2_widget_repair.js`) and expanded `sweep_presets.json`.
+- **LoRA stack/catalog** - added `_catalog_lookup.py`, `_lora_names.py`, and
+  LoRA-stack UI (`web/js/krea2_lora_stack.js`); expanded `_lora_utils.py` and
+  `data/lora_triggers.json`.
+- **Prompt helpers** - new `_prompt_lines.py` / `_prompt_merge.py` /
+  `_sampling_extras.py`; resolution solver and multistage Ultra nodes updated.
+- **Docs** - added `docs/SWEEPS.md`, `docs/sweep_lora_cheatsheet.md`, and
+  `docs/spec_lora_stack_sweeps_2026-10-09.md`; README substantially rewritten.
+
 ## 1.2.0
 
 ### Added - automatic LoRA trigger words
