@@ -180,3 +180,25 @@ loader logs the referrers if a released pipeline still survives (self-diagnosis)
   limit - 8% headroom (Krea 2: 471 of 512). Backups: video_prompter/dev/backup_2026-10-08_token_budget.
 - Not covered: video_prompter LoRA Suggester `prompt_with_triggers` (pre-rewrite merge, substring
   dedup) and the other expander nodes - they use their own length rules.
+
+## Soon (added 2026-11-08)
+
+- Replace `workflows/example-workflow.png` and `workflows/workflow.png` with new example workflow images (current ones carry a test image and prompt).
+- Decide which starter sweep presets (`Start 01-13`, `All samplers + schedulers`) ship in `defaults/sweep_presets.json` - docs/SWEEPS.md walks users through them.
+
+- (after the mu studies) Shift mu on the Custom Sigmas node with the preview plotting the shifted ladder, so curve + mu are seen together. Related ideas parked: a staged resolution-mu policy (per-stage fraction of the rule) and a refine-window start set by sigma (s2/s3_start_sigma) so mu stops moving repaint depth.
+
+## VLM grading for sweep review (added 2026-11-10)
+
+- **VLM model picker in the sweep review**, same approach as the VLM Prompter app (M:\VLM_Prompter): list the LM Studio vision models, pick one, remember the choice.
+- **Automatic per-cell grading** after a sweep (a separate step, so Krea 2 is unloaded first - on one GPU the VLM and Krea 2 should not share VRAM):
+  - signatures / watermarks / stray text
+  - unwanted NSFW (relative to what the prompt asked for)
+  - prompt adherence (score, plus which prompt elements are missing)
+  - anatomy errors (hands, limbs, faces)
+  - the wet look / over-pronounced texture
+  - any further checks Eric adds as plain-language questions
+- **Checkpoint report:** each check as a % of gens (or mean score) per checkpoint, also per prompt; written into the CSV / review workbook and a summary table; usable by Auto Pick.
+- Design notes: cache answers per cell file so re-runs are cheap; calibrate each check against Eric's own ratings on a few sweeps before trusting the numbers; keep the questions editable.
+
+- Checkpoint profiles, later: preferred helper LoRA(s) per checkpoint/style (add to or replace the panel stack - undecided). Spec: docs/spec_checkpoint_profiles_2026-11-12.md

@@ -167,6 +167,7 @@ function addReadoutWidget(node) {
         type: "krea2_reschain",
         name: "reschain",
         value: "",
+        serialize: false,                       // 2026-10-23: no saved widget-value slot
         serializeValue() { return undefined; },
         computeSize() { return [node.size ? node.size[0] : 300, READOUT_H]; },
         draw(ctx, n, widgetWidth, y) { drawReadout(ctx, n, widgetWidth, y); },

@@ -100,6 +100,30 @@ def _token_indices_for_spans(tokenizer, full_text, spans, char_offset):
     return idx
 
 
+def _token_hits(tokenizer, full_text, spans, char_offset):
+    """Like _token_indices_for_spans but also returns WHICH span: [(token_index, w, k)]."""
+    enc = tokenizer(full_text, return_offsets_mapping=True, add_special_tokens=False)
+    idx = []
+    for ti, (a, b) in enumerate(enc["offset_mapping"]):
+        for k, (s, e, w) in enumerate(spans):
+            if b > char_offset + s and a < char_offset + e:
+                idx.append((ti, w, k))
+                break
+    return idx
+
+
+# Per-encode NegPiP record (2026-11-11): read once by the sweep so every cell's manifest row and
+# PNG chunk say what happened (the console scrolls away on long sweeps).
+_LAST_INFO = None
+
+
+def take_negpip_info():
+    """Return and clear the record of the most recent NegPiP encode (None if there was none)."""
+    global _LAST_INFO
+    info, _LAST_INFO = _LAST_INFO, None
+    return info
+
+
 # -- encoders ----------------------------------------------------------------------------
 
 def plain_encode(pipe, prompt, device):
@@ -144,6 +168,7 @@ def negpip_encode(pipe, prompt, device, mode="lifted", strength=1.0, log=print):
             f"[{', '.join(f'{p}:{w:g}' for p, w in negs)}]; prompt now: {clean[:160]!r}")
         return {"embeds": e, "mask": m, "vmul": vmul}
     # in_place
+    global _LAST_INFO
     clean, negs, npos = parse_weighted(prompt)
     if npos:
         log(f"{_LOG} {npos} positive (phrase:w) weight(s) ignored - Krea2 has no prompt weighting")
@@ -152,18 +177,52 @@ def negpip_encode(pipe, prompt, device, mode="lifted", strength=1.0, log=print):
         return out
     prefix = pipe.prompt_template_encode_prefix
     pidx = int(pipe.prompt_template_encode_start_idx)
-    hits = _token_indices_for_spans(pipe.tokenizer, prefix + clean,
-                                    [(s, e_, w) for _, w, (s, e_) in negs], len(prefix))
+    n_sfx = int(pipe.prompt_template_encode_num_suffix_tokens)
+    # 2026-11-11 fix: the encode keeps at most (512 - suffix) prompt tokens, then puts the 5 template
+    # suffix tokens (<|im_end|> ... assistant ...) right after them. Token positions computed on the
+    # UNCUT text could land on those suffix tokens and negate them (negating 'assistant' = a pure-noise
+    # image). Only positions inside the kept prompt text may be flagged; phrases cut off by the budget
+    # are moved to lifted rows instead, so the whole negative list still applies.
+    n_text = max(0, int(out["mask"][0].sum().item()) - n_sfx)
+    budget = int(out["mask"].shape[1]) - n_sfx
+    n_full = len(pipe.tokenizer(clean, add_special_tokens=False)["input_ids"])
+    hits = _token_hits(pipe.tokenizer, prefix + clean,
+                       [(s, e_, w) for _, w, (s, e_) in negs], len(prefix))
     vmul = torch.ones(out["embeds"].shape[1], dtype=torch.float32)
-    n = 0
-    for ti, w in hits:
+    n, cut = 0, set()
+    for ti, w, k in hits:
         j = ti - pidx
-        if 0 <= j < vmul.numel() and bool(out["mask"][0, j]):
+        if 0 <= j < n_text:
             vmul[j] = float(w) * float(strength)
             n += 1
+        else:
+            cut.add(k)
+    lifted, rows, vm = [], [], []
+    for k in sorted(cut):
+        phrase, w, _ = negs[k]
+        r = _phrase_rows(pipe, phrase, device)
+        if r.shape[1] == 0:
+            continue
+        rows.append(r)
+        lifted.append(phrase)
+        vm += [float(w) * float(strength)] * int(r.shape[1])
     log(f"{_LOG} NegPiP (in_place): {len(negs)} phrase(s) -> {n} flagged tokens "
         f"[{', '.join(f'{p}:{w:g}' for p, w, _ in negs)}]")
-    out["vmul"] = vmul if n else None
+    summary = f"in_place: {n} tokens flagged"
+    if cut:
+        msg = (f"prompt + negatives = {n_full} tokens > {budget} budget: {len(lifted)} negative "
+               f"phrase(s) cut off by the budget moved to lifted rows [{', '.join(lifted)}]")
+        log(f"{_LOG} NOTE {msg}")
+        summary += f"; {n_full}/{budget} tokens - {len(lifted)} phrase(s) lifted: {', '.join(lifted)}"
+    if rows:
+        e = torch.cat([out["embeds"]] + [r.to(out["embeds"].dtype) for r in rows], dim=1)
+        m = torch.cat([out["mask"], out["mask"].new_ones((1, len(vm)))], dim=1)
+        vmul = torch.cat([vmul, torch.tensor(vm, dtype=torch.float32)])
+        out = {"embeds": e, "mask": m, "vmul": vmul}
+    else:
+        out["vmul"] = vmul if n else None
+    _LAST_INFO = {"mode": "in_place", "prompt_tokens": n_full, "budget": budget, "flagged": n,
+                  "lifted": lifted, "summary": summary}
     return out
 
 

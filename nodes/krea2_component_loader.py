@@ -405,7 +405,24 @@ _KITCHEN_FORMATS = ("mxfp8", "nvfp4", "convrot_w4a4", "asym_w4a8_int8", "w6a8_in
 _GROUPED_INT8_BITS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
 _QUANT_AUX_SUFFIXES = (".weight_scale", ".weight_scale_2", ".input_scale",
                        ".pre_quant_scale", ".comfy_quant", ".weight_s_rel",
-                       ".weight_s_channel", ".weight_codebook")
+                       ".weight_s_channel", ".weight_codebook",
+                       ".quarot_hadamard")   # 2026-10-16: leftover rotation matrix, see below
+
+
+def _is_prescaled_float_weight(v):
+    """True for a weight that has a companion weight_scale but is ALREADY the real
+    weight (2026-10-16). Some 'INT8 ConvRot ... DynamicVRAM Safe' savers (e.g.
+    VelvetMuse v3.5) write each quantized layer as plain bf16 that is already
+    dequantized AND un-rotated, and leave weight_scale + quarot_hadamard beside it.
+    Measured: raw weight matches the same layer of other Krea2 fine-tunes (cos ~1.0,
+    same std); weight * weight_scale is ~400x too small and renders pure noise.
+    Real quantized storage is int8 / fp8, or int8 codes saved in a float dtype
+    (whole numbers within int8 range) - those still get multiplied as before."""
+    if v.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+        return False
+    sample = v.flatten()[:65536].float()
+    whole = bool(torch.all(sample == sample.round())) and float(sample.abs().max()) <= 128.0
+    return not whole
 
 
 def _kitchen_orig_shape(fmt, qshape, hint=None):
@@ -532,6 +549,7 @@ def _dequant_comfy_quant(sd, dtype, log=None, device=None, quant_confs=None,
     n = 0
     n_rot = 0
     n_cast = 0
+    n_pre = 0
     shape_hints = shape_hints or {}
     n_kit = Counter()
     for k, v in sd.items():
@@ -556,6 +574,11 @@ def _dequant_comfy_quant(sd, dtype, log=None, device=None, quant_confs=None,
                 n_kit[kfmt] += 1
                 continue
         skey = k + "_scale"
+        if k.endswith(".weight") and skey in sd and _is_prescaled_float_weight(v):
+            # already the real weight: no scale, no un-rotation (2026-10-16)
+            out[k] = v.to(dtype)
+            n_pre += 1
+            continue
         if k.endswith(".weight") and skey in sd:
             convrot, gs = _conf_convrot(quant_confs.get(_strip_quant_prefix(k[:-len(".weight")])))
 
@@ -608,11 +631,14 @@ def _dequant_comfy_quant(sd, dtype, log=None, device=None, quant_confs=None,
             torch.cuda.empty_cache()
         except Exception:
             pass
-    if log and (n or n_cast):
+    if log and (n or n_cast or n_pre):
         kit = (" [kitchen: " + ", ".join(f"{f} x{c}" for f, c in n_kit.items()) + "]"
                if n_kit else "")
         log(f"comfy quant: dequantized {n} scaled ({n_rot} ConvRot-unrotated){kit} + "
             f"cast {n_cast} plain weights on {'GPU' if use_gpu else 'CPU'}")
+        if n_pre:
+            log(f"comfy quant: {n_pre} layer(s) stored already dequantized (float weight + "
+                f"leftover weight_scale / quarot_hadamard) - used as stored, scale ignored")
     return out, n
 
 

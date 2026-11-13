@@ -59,6 +59,51 @@ def get_ancestral_step(sigma_from: torch.Tensor, sigma_to: torch.Tensor, eta: fl
     return sigma_down, sigma_up
 
 
+def _in_band(sigma_next, band) -> bool:
+    """SDE band test (2026-10-22): churn only when band[0] <= sigma_next <= band[1]
+    - the same test as ComfyUI's SA-Solver tau window (sigma_next, inclusive).
+    band=None = everywhere (legacy)."""
+    if band is None:
+        return True
+    return float(band[0]) <= float(sigma_next) <= float(band[1])
+
+
+def churn_step(sigma_from, sigma_to, eta, form="ve", band=None):
+    """One ancestral split for the churn-capable samplers (2026-10-22).
+
+    Returns (sigma_down, sigma_up, rescale, eta_i):
+      eta_i - the eta actually applied this step (0 outside the SDE band).
+      ve    - the classic k-diffusion split (get_ancestral_step): integrate to
+              sigma_down, then x += noise * sigma_up; rescale = 1. Exactly the
+              pre-2026-10-22 behaviour (and ComfyUI's res_multistep ancestral).
+      rf    - rectified-flow split, as ComfyUI's sample_euler_ancestral_RF:
+              sigma_down = sigma_to * (1 + (sigma_to/sigma_from - 1) * eta), then
+              x = (a_to/a_down) * x + noise * renoise, a = 1 - sigma,
+              renoise = sqrt(sigma_to^2 - sigma_down^2 * (a_to/a_down)^2).
+              Keeps the signal coefficient at (1 - sigma_to), which the VE split
+              overshoots on flow models (~+2% at eta 0.3, ~+20% at eta 1 on a
+              typical mid-sigma step). eta values are NOT interchangeable between
+              the forms (rf eta = downstep ratio, ve eta = variance share).
+    Callers gate the noise draw on eta_i > 0 (not sigma_up > 0), so with band=None
+    and form="ve" the seeded draw sequence is bit-identical to the legacy code."""
+    eta_i = float(eta or 0.0)
+    if eta_i > 0.0 and not _in_band(sigma_to, band):
+        eta_i = 0.0
+    if form == "rf" and eta_i > 0.0 and float(sigma_to) > 0.0:
+        ratio = 1.0 + (float(sigma_to) / float(sigma_from) - 1.0) * eta_i
+        ratio = max(ratio, 0.01)          # keep sigma_down > 0 for large eta x big steps
+        sigma_down = sigma_to * ratio
+        rescale = (1.0 - sigma_to) / (1.0 - sigma_down)
+        renoise = (sigma_to ** 2 - sigma_down ** 2 * rescale ** 2).clamp(min=0.0) ** 0.5
+        return sigma_down, renoise, float(rescale), eta_i
+    sigma_down, sigma_up = get_ancestral_step(sigma_from, sigma_to, eta=eta_i)
+    return sigma_down, sigma_up, 1.0, eta_i
+
+
+def _rescale(x, r):
+    return x if r == 1.0 else x * r
+
+
 def _phi1(t: torch.Tensor) -> torch.Tensor:
     return torch.expm1(t) / t
 
@@ -83,6 +128,8 @@ def res_multistep_sample(
     s_noise: float = 1.0,
     noise_sampler=None,
     callback=None,
+    churn_form: str = "ve",
+    eta_band=None,
 ):
     """RES 2nd-order exponential multistep (res_2m).
 
@@ -112,7 +159,7 @@ def res_multistep_sample(
     for i in range(n):
         sigma = sigmas[i]
         denoised = denoise_fn(x, sigma)
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up, rescale, eta_i = churn_step(sigmas[i], sigmas[i + 1], eta, churn_form, eta_band)
 
         if callback is not None:
             callback(i, sigma, denoised, x)
@@ -138,8 +185,8 @@ def res_multistep_sample(
             x = (-h).exp() * x + h * (b1 * denoised + b2 * old_denoised)
 
         # ancestral noise (phase 2, eta>0)
-        if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
-            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        if float(sigmas[i + 1]) > 0.0 and eta_i > 0.0:
+            x = _rescale(x, rescale) + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
 
         old_denoised = denoised
         old_sigma_down = sigma_down
@@ -160,6 +207,8 @@ def res_2s_sample(
     s_noise: float = 1.0,
     noise_sampler=None,
     callback=None,
+    churn_form: str = "ve",
+    eta_band=None,
 ):
     """RES 2nd-order SINGLE-step exponential Runge-Kutta ("res_2s").
 
@@ -184,7 +233,7 @@ def res_2s_sample(
     for i in range(n):
         sigma = sigmas[i]
         d1 = denoise_fn(x, sigma)
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up, rescale, eta_i = churn_step(sigmas[i], sigmas[i + 1], eta, churn_form, eta_band)
 
         if callback is not None:
             callback(i, sigma, d1, x)
@@ -208,8 +257,8 @@ def res_2s_sample(
             b1 = phi1_h - b2
             x = (-h).exp() * x + h * (b1 * d1 + b2 * d2)
 
-        if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
-            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        if float(sigmas[i + 1]) > 0.0 and eta_i > 0.0:
+            x = _rescale(x, rescale) + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
 
     return x
 
@@ -270,6 +319,8 @@ def deis_sample(
     s_noise: float = 1.0,
     noise_sampler=None,
     callback=None,
+    churn_form: str = "ve",
+    eta_band=None,
 ):
     """DEIS multistep exponential integrator ("deis_3m" = order 3, "deis_4m" = order 4).
 
@@ -307,7 +358,7 @@ def deis_sample(
         if callback is not None:
             callback(i, sigma, denoised, x)
 
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up, rescale, eta_i = churn_step(sigmas[i], sigmas[i + 1], eta, churn_form, eta_band)
 
         if float(sigma_down) <= 0.0:
             # terminal: the exact flow solution at sigma -> 0 is the data prediction itself
@@ -323,8 +374,8 @@ def deis_sample(
             x = math.exp(-h) * x + b[0] * preds[0]
             for bc, pv in zip(b[1:], preds[1:]):
                 x = x + bc * pv
-            if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
-                x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+            if float(sigmas[i + 1]) > 0.0 and eta_i > 0.0:
+                x = _rescale(x, rescale) + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
 
         x0_hist.insert(0, denoised)
         t_hist.insert(0, -math.log(float(sigma)))
@@ -336,7 +387,7 @@ def deis_sample(
 
 @torch.no_grad()
 def abnorsett_sample(denoise_fn, x, sigmas, order=4, eta=0.0, s_noise=1.0,
-                     noise_sampler=None, callback=None):
+                     noise_sampler=None, callback=None, churn_form="ve", eta_band=None):
     """Exponential Adams-Bashforth-Norsett multistep (abnorsett_3m / _4m).
 
     Same kernel-exact machinery as deis_sample with ONE deliberate change:
@@ -370,7 +421,7 @@ def abnorsett_sample(denoise_fn, x, sigmas, order=4, eta=0.0, s_noise=1.0,
         denoised = denoise_fn(x, sigma)
         if callback is not None:
             callback(i, sigma, denoised, x)
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up, rescale, eta_i = churn_step(sigmas[i], sigmas[i + 1], eta, churn_form, eta_band)
         if float(sigma_down) <= 0.0:
             x = denoised
         else:
@@ -382,8 +433,8 @@ def abnorsett_sample(denoise_fn, x, sigmas, order=4, eta=0.0, s_noise=1.0,
             x = math.exp(-h) * x + b[0] * preds[0]
             for bc, pv in zip(b[1:], preds[1:]):
                 x = x + bc * pv
-            if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
-                x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+            if float(sigmas[i + 1]) > 0.0 and eta_i > 0.0:
+                x = _rescale(x, rescale) + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
         x0_hist.insert(0, denoised)
         x0_hist = x0_hist[:order - 1]
     return x
@@ -391,7 +442,7 @@ def abnorsett_sample(denoise_fn, x, sigmas, order=4, eta=0.0, s_noise=1.0,
 
 @torch.no_grad()
 def lawson4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
-                   noise_sampler=None, callback=None):
+                   noise_sampler=None, callback=None, churn_form="ve", eta_band=None):
     """Lawson(4) exponential RK (lawson4_4s): classical RK4 through the
     integrating factor e^t on the flow ODE dx/dt = x0(x,t) - x.
 
@@ -420,7 +471,7 @@ def lawson4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
         n1 = denoise_fn(x, sigma)
         if callback is not None:
             callback(i, sigma, n1, x)
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up, rescale, eta_i = churn_step(sigmas[i], sigmas[i + 1], eta, churn_form, eta_band)
         if float(sigma_down) <= 0.0:
             x = n1
             continue
@@ -431,14 +482,14 @@ def lawson4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
         n3 = denoise_fn(eh2 * x + 0.5 * h * n2, s_mid)
         n4 = denoise_fn(eh * x + h * eh2 * n3, sigma_down)
         x = eh * x + (h / 6.0) * (eh * n1 + 2.0 * eh2 * (n2 + n3) + n4)
-        if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
-            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        if float(sigmas[i + 1]) > 0.0 and eta_i > 0.0:
+            x = _rescale(x, rescale) + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
     return x
 
 
 @torch.no_grad()
 def etdrk4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
-                  noise_sampler=None, callback=None):
+                  noise_sampler=None, callback=None, churn_form="ve", eta_band=None):
     """ETDRK4 (Cox-Matthews) exponential RK (etdrk4_4s).
 
     Single-step order 4, 4 model evals/step, no history -> stable on every
@@ -463,7 +514,7 @@ def etdrk4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
         n1 = denoise_fn(x, sigma)
         if callback is not None:
             callback(i, sigma, n1, x)
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up, rescale, eta_i = churn_step(sigmas[i], sigmas[i + 1], eta, churn_form, eta_band)
         if float(sigma_down) <= 0.0:
             x = n1
             continue
@@ -484,8 +535,8 @@ def etdrk4_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
         b2 = 2.0 * p2 - 4.0 * p3
         b4 = -p2 + 4.0 * p3
         x = eh * x + h * (b1 * n1 + b2 * (n2 + n3) + b4 * n4)
-        if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
-            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        if float(sigmas[i + 1]) > 0.0 and eta_i > 0.0:
+            x = _rescale(x, rescale) + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
     return x
 
 
@@ -610,9 +661,36 @@ def lcm_sample(
 
 
 @torch.no_grad()
+def hybrid_split(sigmas, lcm_steps=0, handoff_sigma=0.0) -> int:
+    """Number of lcm steps at the head of an lcm-hybrid window (2026-10-23).
+
+    handoff_sigma > 0: the head runs until the ladder reaches that sigma - the tail starts
+    at the FIRST ladder sigma at or below it (never hands off early); if no ladder point is
+    at or below it, the head takes all but the last step. Same value = same switch point on
+    every schedule, step count and shift.
+    handoff_sigma = 0: lcm_steps decides (0 = auto ceil(n/2)) - the pre-2026-10-23 rule.
+    Always clamped to [1, n-1] so both halves run."""
+    n = int(len(sigmas)) - 1
+    if n <= 1:
+        return max(n, 0)
+    h = float(handoff_sigma or 0.0)
+    if h > 0.0:
+        k = n - 1
+        for j in range(1, n):
+            if float(sigmas[j]) <= h:
+                k = j
+                break
+    else:
+        k = int(lcm_steps or 0)
+        if k <= 0:
+            k = -(-n // 2)  # auto: ceil(n/2), churn half gets the odd extra step
+    return max(1, min(n - 1, k))
+
+
 def lcm_hybrid_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
                       noise_sampler=None, callback=None,
-                      second="deis_3m", lcm_steps=0):
+                      second="deis_3m", lcm_steps=0, churn_form="ve", eta_band=None,
+                      handoff_sigma=0.0):
     """lcm churn for the FIRST part of the window, an ODE/SDE sampler after.
 
     Rationale (2026-07-23): with pure lcm the final detail is bounded by the x0
@@ -636,10 +714,7 @@ def lcm_hybrid_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
     if n <= 1:
         return lcm_sample(denoise_fn, x, sigmas, s_noise=s_noise,
                           noise_sampler=noise_sampler, callback=callback)
-    k = int(lcm_steps or 0)
-    if k <= 0:
-        k = -(-n // 2)  # auto: ceil(n/2), churn half gets the odd extra step
-    split = max(1, min(n - 1, k))
+    split = hybrid_split(sigmas, lcm_steps, handoff_sigma)   # 2026-10-23: shared rule
     x = lcm_sample(denoise_fn, x, sigmas[:split + 1], s_noise=s_noise,
                    noise_sampler=noise_sampler, callback=callback)
     _cb2 = (None if callback is None
@@ -647,9 +722,10 @@ def lcm_hybrid_sample(denoise_fn, x, sigmas, eta=0.0, s_noise=1.0,
     if second == "res_2m":
         return res_multistep_sample(denoise_fn, x, sigmas[split:], eta=eta,
                                     s_noise=s_noise, noise_sampler=noise_sampler,
-                                    callback=_cb2)
+                                    callback=_cb2, churn_form=churn_form, eta_band=eta_band)
     return deis_sample(denoise_fn, x, sigmas[split:], max_order=3, eta=eta,
-                       s_noise=s_noise, noise_sampler=noise_sampler, callback=_cb2)
+                       s_noise=s_noise, noise_sampler=noise_sampler, callback=_cb2,
+                       churn_form=churn_form, eta_band=eta_band)
 
 
 # --------------------------------------------------------------------------------------
@@ -694,6 +770,8 @@ def rk_explicit_sample(
     s_noise: float = 1.0,
     noise_sampler=None,
     callback=None,
+    churn_form: str = "ve",
+    eta_band=None,
 ):
     """Generic explicit Runge-Kutta on the flow ODE, in SIGMA space.
 
@@ -723,7 +801,7 @@ def rk_explicit_sample(
     for i in range(n):
         sigma = sigmas[i]
         den1 = denoise_fn(x, sigma)
-        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        sigma_down, sigma_up, rescale, eta_i = churn_step(sigmas[i], sigmas[i + 1], eta, churn_form, eta_band)
 
         if callback is not None:
             callback(i, sigma, den1, x)
@@ -748,8 +826,8 @@ def rk_explicit_sample(
                     upd = upd + bj * kj
             x = x + h * upd
 
-        if float(sigmas[i + 1]) > 0.0 and eta > 0.0:
-            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        if float(sigmas[i + 1]) > 0.0 and eta_i > 0.0:
+            x = _rescale(x, rescale) + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
 
     return x
 

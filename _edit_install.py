@@ -19,6 +19,32 @@ import torch.nn.functional as F
 _LOG = "[EricKrea2-EditGuide]"
 
 
+def _negpip_field_groups(text, weight=-1.0):
+    """negpip_negative field -> NegPiP group string, e.g. '(sweat:-1), (wet ground:-0.5)'.
+    Explicit (phrase:w) groups are kept (a non-negative w falls back to `weight`); everything
+    else is split on commas / newlines and each item becomes its own group at `weight`."""
+    from ._edit_text import _GROUP_RE
+    s = str(text or "")
+    groups = []
+    for m in _GROUP_RE.finditer(s):
+        ph, w = m.group(1).strip(), float(m.group(2))
+        if ph:
+            groups.append(f"({ph}:{(w if w < 0 else weight):g})")
+    for t in _GROUP_RE.sub(",", s).replace("\n", ",").split(","):
+        t = t.strip().strip("()").strip()
+        if t:
+            groups.append(f"({t}:{weight:g})")
+    return ", ".join(groups)
+
+
+def _with_field(prompt, groups):
+    """Append the field's NegPiP groups to a prompt / instruction (no-op when empty)."""
+    if not groups:
+        return prompt
+    p = str(prompt or "").rstrip().rstrip(",").rstrip()
+    return f"{p}, {groups}" if p else groups
+
+
 def _round16(v):
     return max(16, int(round(float(v) / 16.0)) * 16)
 
@@ -44,6 +70,13 @@ def prepare_edit_guidance(pipe, kwargs, edit, guide, resolve_s1_dims, log=print)
     use_negpip = bool(g.get("negpip"))
     npm = g.get("negpip_mode", "lifted") if use_negpip else None
     nps = float(g.get("negpip_strength", 1.0))
+    # negpip_negative field (2026-11-03): its items join the prompt's own (phrase:-w) groups.
+    _npf_raw = str(g.get("negpip_negative", "") or "").strip()
+    npf = _negpip_field_groups(_npf_raw) if (use_negpip and _npf_raw) else ""
+    if npf:
+        log(f"{_LOG} NegPiP field: {npf[:160]!r} (added to any groups in the prompt)")
+    elif _npf_raw:
+        log(f"{_LOG} negpip_negative is filled but NegPiP is off - ignored")
 
     if g.get("nag"):
         neg_txt = str(g.get("nag_negative", "")).strip()
@@ -98,7 +131,8 @@ def prepare_edit_guidance(pipe, kwargs, edit, guide, resolve_s1_dims, log=print)
         e["refs"] = refs
         e["target_grid"] = (s1_h // 16, s1_w // 16)
         proc = e.get("vision_processor_source")
-        pos = grounded_encode(pipe, e["instruction"], e["images"], device, e["grounding_px"],
+        pos = grounded_encode(pipe, _with_field(e["instruction"], npf), e["images"], device,
+                              e["grounding_px"],
                               e.get("system_prompt", ""), proc, negpip_mode=npm,
                               negpip_strength=nps, log=log)
         if pos["vmul"] is not None:
@@ -108,7 +142,7 @@ def prepare_edit_guidance(pipe, kwargs, edit, guide, resolve_s1_dims, log=print)
                                             e.get("system_prompt", ""), proc, log=log)
         ptxt = str(kwargs.get("prompt", "") or "").strip()
         if ptxt:
-            rc = negpip_encode(pipe, ptxt, device, npm, nps, log) if use_negpip else \
+            rc = negpip_encode(pipe, _with_field(ptxt, npf), device, npm, nps, log) if use_negpip else \
                 plain_encode(pipe, ptxt, device)
             e["refine_cond"] = rc
             if rc["vmul"] is not None:
@@ -123,15 +157,18 @@ def prepare_edit_guidance(pipe, kwargs, edit, guide, resolve_s1_dims, log=print)
     elif use_negpip:
         if pc_connected:
             log(f"{_LOG} NegPiP: prompt_conditioning is precomputed (Vision Prompt) - its text "
-                "can't be parsed here; NegPiP inactive. Put (phrase:-1) in Ultra's prompt instead.")
+                "can't be parsed here; NegPiP inactive (prompt groups and the negpip_negative field). "
+                "Disconnect prompt_conditioning to use NegPiP.")
         else:
-            pos = negpip_encode(pipe, str(kwargs.get("prompt", "") or ""), device, npm, nps, log)
+            pos = negpip_encode(pipe, _with_field(str(kwargs.get("prompt", "") or ""), npf), device,
+                                npm, nps, log)
             kwargs["prompt_conditioning"] = {"embeds": pos["embeds"], "mask": pos["mask"]}
             if pos["vmul"] is not None:
                 vmul_by_len[int(pos["embeds"].shape[1])] = pos["vmul"]
     g["vmul_by_len"] = vmul_by_len
     if use_negpip and not vmul_by_len:
-        log(f"{_LOG} NegPiP on but no (phrase:-w) groups found - NegPiP inactive")
+        log(f"{_LOG} NegPiP on but no (phrase:-w) groups in the prompt and negpip_negative is "
+            "empty - NegPiP inactive")
         g["negpip"] = False
     if not (e or g.get("nag") or g.get("negpip")):
         return None

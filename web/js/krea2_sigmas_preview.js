@@ -210,6 +210,7 @@ function addPlotWidget(node) {
         type: "krea2_sigplot",
         name: "sigplot",
         value: "",
+        serialize: false,                           // 2026-10-23: no saved widget-value slot
         serializeValue() { return undefined; },     // purely a viewer
         computeSize() { return [node.size ? node.size[0] : 300, PLOT_H]; },
         draw(ctx, n, widgetWidth, y) { drawPlot(ctx, n, widgetWidth, y); },

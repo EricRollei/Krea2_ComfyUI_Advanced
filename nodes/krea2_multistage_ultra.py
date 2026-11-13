@@ -44,6 +44,7 @@ from .._res_solver import (res_multistep_sample, res_2s_sample, deis_sample,
                            er_sde_sample)
 from .. import _sigmas
 from .. import _telemetry
+from .. import _traj_probe
 
 _VAE_SCALE_FACTOR = 8  # AutoencoderKLQwenImage is f8
 _SCHEDULES = ["linear", "balanced", "karras", "beta57", "beta", "bong_tangent",
@@ -375,7 +376,8 @@ def _jitter_embeds(embeds, strength, generator):
 def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
                         is_distilled, guidance_scale, eta, generator, progress_cb=None,
                         sigma_window=None, method="res_2m", cond_override=None, noise_type="white",
-                        shift_policy=None, shift_stage=None, hybrid_lcm_steps=0):
+                        shift_policy=None, shift_stage=None, hybrid_lcm_steps=0,
+                        eta_band=None, churn_form="ve", hybrid_handoff=0.0):
     """Run the RES multistep (res_2m) sampler over the Krea2 transformer directly,
     bypassing pipe.__call__. Returns the packed latent (same format as pipe(...).images).
 
@@ -466,15 +468,24 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
             noise_sampler = lambda s, sn: torch.randn(
                 x.shape, device=device, dtype=torch.float32, generator=generator)
 
+    # SDE-band telemetry + trajectory probe (2026-10-22): diagnostics only, fail-silent.
+    _churn_mask = _traj_probe.churn_mask(sigmas, eta, eta_band, method, hybrid_lcm_steps,
+                                         float(hybrid_handoff or 0.0))
+    _traj_probe.print_handoff(shift_stage, sigmas, method, hybrid_lcm_steps, hybrid_handoff)
+    _traj_probe.print_band(shift_stage, sigmas, eta, eta_band, churn_form, method, _churn_mask)
+    _probe = _traj_probe.start(shift_stage, _churn_mask)
+
     def _cb(i, sigma, denoised, xx):
         if progress_cb is not None:
             progress_cb()
+        if _probe is not None:
+            _probe.observe(i, sigma, denoised)
 
     if method == "res_2s":
-        out = res_2s_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+        out = res_2s_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band,
                             noise_sampler=noise_sampler, callback=_cb)
     elif method == "deis_3m":
-        out = deis_sample(denoise_fn, x, sigmas, max_order=3, eta=float(eta or 0.0),
+        out = deis_sample(denoise_fn, x, sigmas, max_order=3, eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band,
                           noise_sampler=noise_sampler, callback=_cb)
     elif method in ("abnorsett_3m", "abnorsett_4m"):
         # Fixed-coefficient Norsett exponential AB (2026-07-27): uniform-step
@@ -484,7 +495,7 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
         # into garbage. deis_4m was dropped for that reason (Eric's call).
         out = abnorsett_sample(denoise_fn, x, sigmas,
                                order=(3 if method == "abnorsett_3m" else 4),
-                               eta=float(eta or 0.0),
+                               eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band,
                                noise_sampler=noise_sampler, callback=_cb)
     elif method == "er_sde":
         # Intrinsically stochastic (its own churn law) - eta is IGNORED by
@@ -493,14 +504,14 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
         out = er_sde_sample(denoise_fn, x, sigmas,
                             noise_sampler=noise_sampler, callback=_cb)
     elif method == "lawson4_4s":
-        out = lawson4_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+        out = lawson4_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band,
                              noise_sampler=noise_sampler, callback=_cb)
     elif method == "etdrk4_4s":
-        out = etdrk4_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+        out = etdrk4_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band,
                             noise_sampler=noise_sampler, callback=_cb)
     elif method == "rk6_7s":
         out = rk_explicit_sample(denoise_fn, x, sigmas, tableau="rk6_7s",
-                                 eta=float(eta or 0.0), noise_sampler=noise_sampler,
+                                 eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band, noise_sampler=noise_sampler,
                                  callback=_cb)
     elif method == "euler":
         # eta CLAMPED to 0 for euler (2026-07-25, Eric's ruling): the GUI
@@ -530,14 +541,16 @@ def _res_denoise_packed(pipe, prompt, neg, height, width, x_start, raw_sigmas,
             # detail-development half). hybrid_lcm_steps = exact churn steps
             # (0 = auto half); replaced the old fraction 2026-07-26 because at
             # low step counts small % changes were silent no-ops.
-            out = lcm_hybrid_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+            out = lcm_hybrid_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band,
                                     noise_sampler=_ns, callback=_cb,
                                     second=("res_2m" if method == "lcm_hybrid2"
                                             else "deis_3m"),
-                                    lcm_steps=int(hybrid_lcm_steps or 0))
+                                    lcm_steps=int(hybrid_lcm_steps or 0),
+                                    handoff_sigma=float(hybrid_handoff or 0.0))
     else:
-        out = res_multistep_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0),
+        out = res_multistep_sample(denoise_fn, x, sigmas, eta=float(eta or 0.0), churn_form=churn_form, eta_band=eta_band,
                                    noise_sampler=noise_sampler, callback=_cb)
+    _traj_probe.finish(_probe)
     return out.to(dtype)
 
 
@@ -855,18 +868,21 @@ class EricKrea2MultistageUltra:
                                "1x decode per stage; off by default."}),
                 # -- distilled shift policy (added 2026-07-21; appended LAST so saved --
                 # -- workflows keep their positional widget values intact           --
-                "distilled_shift": (["fixed", "resolution", "manual"], {"default": "fixed",
+                "distilled_shift": (["fixed", "resolution", "manual"], {"default": "resolution",
                     "tooltip": "Per-stage flow-matching shift (mu) policy for DISTILLED/Turbo "
                                "models (Raw is already resolution-aware and ignores this).\n"
-                               "fixed: mu=1.15 everywhere - Krea's distillation value, calibrated "
-                               "for <=2K. Above that the schedule is under-shifted and upscale "
-                               "error can survive as mottling/splotches on many fine tunes.\n"
-                               "resolution: keep 1.15 up to the ~1.6MP calibration band, extend "
-                               "mu automatically above it (recommended starting point).\n"
+                               "resolution (default since Nov 2026): 1.15 up to ~1.6MP, rising with "
+                               "size above it (about 1.3 @2MP, 1.71 @3MP, 2.13 @4MP, 2.33 @4.5MP). "
+                               "Field-tested: matches the visually best Stage 1 mu from 2 to 4MP. "
+                               "Refine stages looked best a little lower (2.1 vs 2.33 at a 4.5MP S2) "
+                               "- use manual for that.\n"
+                               "fixed: mu=1.15 everywhere - Krea's distillation value; right only "
+                               "up to ~2MP. Above that it is under-shifted: crunchy over-detail, the "
+                               "wet look, speckle and mottling.\n"
                                "manual: dial each stage with shift_mu_s1/s2/s3 below.\n"
                                "NOTE: fixed and resolution IGNORE the shift_mu fields below "
-                               "(manual only). Stages set to the euler sampler skip this policy "
-                               "entirely and run the stock diffusers flow-match shift instead.\n"
+                               "(manual only). A Stage 1 text-to-image euler run skips this policy "
+                               "and uses the stock diffusers shift (1.15).\n"
                                "Rule of thumb: LOWER mu = more low-sigma time = more fine "
                                "detail/texture (but mottling risk at high res); HIGHER mu = more "
                                "high-sigma time = smoother, cleaner structure (too high = "
@@ -874,11 +890,14 @@ class EricKrea2MultistageUltra:
                 "shift_mu_s1": ("FLOAT", {"default": 1.15, "min": 0.1, "max": 10.0, "step": 0.05,
                     "tooltip": "Manual mu for Stage 1 - used ONLY when distilled_shift=manual "
                                "(fixed/resolution ignore it, and euler stages ignore it too). "
-                               "1.15 = Turbo default; usually leave it there for <=2MP S1. "
-                               "Lower = more detail, higher = smoother."}),
+                               "Field-tested best: ~1.3 @2MP, 1.75 @3MP, ~2.1 @4MP (= what "
+                               "'resolution' computes). Lower = more detail, higher = smoother and "
+                               "a changed composition. Too low for the size brings out the wet look "
+                               "and over-pronounced pores / speckle."}),
                 "shift_mu_s2": ("FLOAT", {"default": 1.15, "min": 0.1, "max": 10.0, "step": 0.05,
                     "tooltip": "Manual mu for Stage 2 - used ONLY when distilled_shift=manual "
                                "(fixed/resolution ignore it, and euler stages ignore it too). "
+                               "Field-tested: 2.1 for a 4.5MP refine (resolution would use 2.33). "
                                "Try 2.0-3.0 at 4-8MP if splotches persist. Lower = more fine "
                                "detail/texture, higher = smoother/cleaner (too high = soft/waxy)."}),
                 "shift_mu_s3": ("FLOAT", {"default": 1.15, "min": 0.1, "max": 10.0, "step": 0.05,
@@ -950,6 +969,12 @@ class EricKrea2MultistageUltra:
                                "(negative prompt that works at guidance 0) and/or NegPiP "
                                "((phrase:-1) in the prompt). Combinable with each other and with "
                                "edit; skipped with style / paint / ref_latents."}),
+                # Appended 2026-10-23 (a socket - no widget value, saved workflows unaffected):
+                # the sampling extras live on their own node, Eric Krea2 Hybrid Sigma Handoff.
+                "sampling": ("KREA2_SAMPLING", {
+                    "tooltip": "Optional: from Eric Krea2 Hybrid Sigma Handoff - lcm-hybrid handoff by "
+                               "sigma, per-stage SDE band and churn form. Unwired = previous behaviour. "
+                               "Sweep cells that set these keys override the node for that cell."}),
             },
         }
 
@@ -1310,18 +1335,39 @@ class EricKrea2MultistageUltra:
                  turbo_guidance="off",
                  upscale_vae=None, upscale_vae_mode="disabled", s1_s2_upscale_vae=False,
                  decode_vae=None, preview_stages=False, sigmas=None,
-                 distilled_shift="fixed", shift_mu_s1=1.15, shift_mu_s2=1.15, shift_mu_s3=1.15,
+                 distilled_shift="resolution", shift_mu_s1=1.15, shift_mu_s2=1.15, shift_mu_s3=1.15,
                  upscale_renorm="off", s1_hybrid_steps=0, s2_hybrid_steps=0,
-                 s3_hybrid_steps=0, degrid="off", _s1_reuse=None):
+                 s3_hybrid_steps=0, degrid="off", _s1_reuse=None,
+                 s1_sde_hi=None, s1_sde_lo=None, s2_sde_hi=None, s2_sde_lo=None,
+                 s3_sde_hi=None, s3_sde_lo=None, churn_form=None,
+                 s1_hybrid_handoff=None, s2_hybrid_handoff=None, s3_hybrid_handoff=None,
+                 sampling=None):
         pipe = krea2_pipeline["pipeline"]
         _degrid_mode = str(degrid or "off")
         _degrid_hops = _degrid_mode in ("hops", "hops+final")
         _degrid_final = _degrid_mode in ("final", "hops+final")
+        # Sampling extras (2026-10-22/23): hybrid handoff by sigma, SDE band, churn form.
+        # explicit value (a sweep cell) > `sampling` bundle (Hybrid Sigma Handoff node)
+        # > legacy defaults (no node = exactly the old behaviour, bit-identical solver path).
+        from .. import _sampling_extras as _sxm
+        _sx = _sxm.resolve({"s1_sde_hi": s1_sde_hi, "s1_sde_lo": s1_sde_lo,
+                            "s2_sde_hi": s2_sde_hi, "s2_sde_lo": s2_sde_lo,
+                            "s3_sde_hi": s3_sde_hi, "s3_sde_lo": s3_sde_lo,
+                            "churn_form": churn_form,
+                            "s1_hybrid_handoff": s1_hybrid_handoff,
+                            "s2_hybrid_handoff": s2_hybrid_handoff,
+                            "s3_hybrid_handoff": s3_hybrid_handoff}, sampling)
+        _bands = _sxm.bands(_sx)
+        _handoffs = _sxm.handoffs(_sx)
+        _churn_form = _sx["churn_form"]
+        if sampling is not None or _sxm.describe(_sx) != "all at defaults":
+            print(f"[EricKrea2-MS] sampling extras: {_sxm.describe(_sx)}")
+        _traj_probe.reset()
         is_distilled = krea2_pipeline.get("is_distilled", False)
         # Distilled shift policy (2026-07-21): per-stage mu for Turbo models - see
         # _compute_mu. Always announce the resolved mode so the active policy is
         # visible in the console (a silent 'fixed' hid the pre-GUI env-var hook).
-        shift_policy = {"mode": str(distilled_shift or "fixed").lower(),
+        shift_policy = {"mode": str(distilled_shift or "resolution").lower(),
                        "mu": {"s1": float(shift_mu_s1), "s2": float(shift_mu_s2),
                               "s3": float(shift_mu_s3)}}
         if is_distilled:
@@ -1609,7 +1655,9 @@ class EricKrea2MultistageUltra:
                                        hybrid_lcm_steps={"s1": s1_hybrid_steps,
                                                          "s2": s2_hybrid_steps,
                                                          "s3": s3_hybrid_steps}[stage_key],
-                                       shift_policy=shift_policy, shift_stage=stage_key)
+                                       shift_policy=shift_policy, shift_stage=stage_key,
+                                       eta_band=_bands.get(stage_key), churn_form=_churn_form,
+                                       hybrid_handoff=_handoffs.get(stage_key, 0.0))
 
         def _latent_dict(lat, h, w):
             return {"packed": lat.detach(), "height": h, "width": w, "vae_scale_factor": vsf}
@@ -1691,7 +1739,9 @@ class EricKrea2MultistageUltra:
                                               progress_cb=_res_progress, method=s1_sampler,
                                               cond_override=_cond_override, noise_type=s1_noise,
                                               hybrid_lcm_steps=s1_hybrid_steps,
-                                              shift_policy=shift_policy, shift_stage="s1")
+                                              shift_policy=shift_policy, shift_stage="s1",
+                                              eta_band=_bands.get("s1"), churn_form=_churn_form,
+                                              hybrid_handoff=_handoffs.get("s1", 0.0))
             else:
                 if s1_noise != "white" and s1_eta and s1_eta > 0:
                     print(f"[EricKrea2-MS]    note: s1_noise={s1_noise} has no effect with "

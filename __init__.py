@@ -16,6 +16,16 @@ NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
 _MODULES = []
+
+# First run: create the user's preset files from the shipped defaults/ (never overwrites).
+try:
+    from ._settings import seed_default_presets
+    _seeded = seed_default_presets()
+    if _seeded:
+        print(f"[Eric_Krea2] created preset files from defaults/: {', '.join(_seeded)}")
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] default presets not seeded: {e}")
+
 try:
     from .nodes import (krea2_loader, krea2_generate, krea2_decode, krea2_encode,
                         krea2_multistage_ultra, krea2_multistage_ultra_v2, krea2_lora,
@@ -36,6 +46,31 @@ except Exception as e:  # pragma: no cover - surfaced in ComfyUI console
     import traceback
     print(f"[Eric_Krea2] Failed to import nodes: {e}")
     traceback.print_exc()
+
+# Imported on its own (2026-10-15) so a problem here can never take the other nodes down.
+try:
+    from .nodes import krea2_prompt_lora_tags
+    _MODULES.append(krea2_prompt_lora_tags)
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] Prompt LoRA Tags node not loaded: {e}")
+
+try:  # share sheets for finished sweeps (2026-10-16)
+    from .nodes import krea2_sweep_sheets
+    _MODULES.append(krea2_sweep_sheets)
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] Sweep Sheets node not loaded: {e}")
+
+try:  # Hybrid Sigma Handoff side panel for Ultra (2026-10-23)
+    from .nodes import krea2_hybrid_handoff
+    _MODULES.append(krea2_hybrid_handoff)
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] Hybrid Sigma Handoff node not loaded: {e}")
+
+try:  # checkpoint picker for sweeps (2026-11-08)
+    from .nodes import krea2_sweep_checkpoints
+    _MODULES.append(krea2_sweep_checkpoints)
+except Exception as e:  # pragma: no cover
+    print(f"[Eric_Krea2] Sweep Checkpoints node not loaded: {e}")
 
 for _m in _MODULES:
     NODE_CLASS_MAPPINGS.update(getattr(_m, "NODE_CLASS_MAPPINGS", {}))

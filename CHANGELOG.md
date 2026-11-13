@@ -3,6 +3,43 @@
 All notable changes to Eric_Krea2 are documented here. Format loosely based on
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.7.0 - November 2026
+
+Versions 1.3 to 1.6 were documented only in the README's What's New, now
+[docs/WHATS_NEW.md](docs/WHATS_NEW.md), which has the month-by-month detail.
+
+### Added
+- **Eric Krea2 Hybrid Sigma Handoff** node: hybrid handoff by sigma, per-stage SDE band, churn form.
+- Trajectory probe; LoRA picks by creator, one pick per prompt and `#random` word options in the
+  Sweep Plan; `negpip_negative` field on the Negative Guidance node.
+- Sweep files, review, share sheets and word-option helpers (`_sweep_files.py`, `_sweep_review.py`,
+  `_sweep_sheets.py`, `_sweep_words.py`), sweep counter / active-indicator / trigger-mode / widget-repair
+  front-end scripts.
+
+- **Eric Krea2 Sweep Checkpoints** node and checkpoint sweeps: several Turbo checkpoints in one sweep
+  folder, contact sheets per checkpoint plus a combined one, `checkpoint` and `uniq_ckpt` columns, all
+  models unloaded afterwards.
+- Shipped starter presets in `defaults/` (copied on first run; the user's sigma, sweep and loader preset
+  files are no longer tracked by git).
+
+### Fixed
+- **NegPiP `in_place` + long prompts gave pure-noise images.** When prompt + NegPiP negatives (incl. the
+  `negpip_negative` field) exceeded the 507-token text budget, flagged positions computed on the uncut text
+  landed on the template's closing tokens; negating `assistant` destroyed the conditioning. Only kept prompt
+  tokens are flagged now, and negative phrases cut off by the budget move to lifted rows, so the whole
+  negative list still applies.
+- `combos_file` with one JSON object per line was rejected ("Extra data") - now read as documented.
+- Sweep cells now record the Negative Guidance (`guidance`) and Hybrid Sigma Handoff (`sampling`) settings
+  in their PNG chunk; the NegPiP outcome per cell (tokens flagged, phrases lifted) is in the manifest and a
+  `negpip` CSV column.
+
+### Changed
+- `distilled_shift` defaults to `resolution` (was `fixed`): a mu sweep showed the resolution rule matches
+  the visually best Stage 1 shift from 2 to 4 MP; `fixed` 1.15 under-shifts above ~2 MP (over-detail,
+  the wet look). Saved workflows keep their own value.
+- `churn_form` defaults to `rf` everywhere.
+- README reorganised into an overview plus pages under `docs/`; new sections on the wet effect and on
+  hand-written sweep `combos` cells (`docs/SWEEPS.md`).
 ## 1.2.0
 
 ### Added - automatic LoRA trigger words

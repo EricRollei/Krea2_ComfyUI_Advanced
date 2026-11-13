@@ -74,3 +74,14 @@ _tmp_*.py
 # inspector is documented in the README, so it stays tracked.
 docs/tools/*
 !docs/tools/krea2_checkpoint_inspector.py
+
+# Disabled web extensions parked locally
+_web_off/
+
+# The user's own preset libraries (shipped starters live in defaults/ and are copied here on first run)
+/sigmas_presets.json
+/sweep_presets.json
+/loader_presets.json
+
+# local test inputs (contain private prompts)
+/sweep_tests/

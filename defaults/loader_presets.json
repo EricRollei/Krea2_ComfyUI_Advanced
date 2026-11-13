@@ -1,0 +1,28 @@
+{
+  "Example - Krea 2 Turbo (diffusers folder)": {
+    "loader": {
+      "base_pipeline_path": "C:\\ComfyUI\\models\\diffusers\\Krea-2-Turbo",
+      "transformer_path": "",
+      "text_encoder_path": "",
+      "vae_path": "",
+      "precision": "bf16",
+      "attention_backend": "auto",
+      "device": "cuda",
+      "keep_in_vram": true,
+      "offload_vae": false
+    }
+  },
+  "Example - Turbo fine-tune (single file)": {
+    "loader": {
+      "base_pipeline_path": "C:\\ComfyUI\\models\\diffusers\\Krea-2-Turbo",
+      "transformer_path": "C:\\ComfyUI\\models\\diffusion_models\\Krea2\\your-finetune.safetensors",
+      "text_encoder_path": "",
+      "vae_path": "",
+      "precision": "bf16",
+      "attention_backend": "auto",
+      "device": "cuda",
+      "keep_in_vram": true,
+      "offload_vae": false
+    }
+  }
+}

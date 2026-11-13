@@ -197,3 +197,30 @@ def lora_list_to_slots(entries, max_slots: int = 10) -> dict:
             out["ephemeral"] = bool(e["ephemeral"])
             break
     return out
+
+# -- shipped default presets ----------------------------------------------------------------
+# The package ships starter preset libraries in defaults/<section>_presets.json. The live
+# files in the package root are the user's own (git-ignored for sigmas / sweep / loader), so a
+# fresh install starts from the shipped examples and later saves never touch the defaults.
+
+def seed_default_presets() -> list:
+    """Copy each defaults/<section>_presets.json to the package root when that file does not
+    exist yet. Never overwrites. Returns the file names it created."""
+    import shutil
+    root = os.path.dirname(__file__)
+    src_dir = os.path.join(root, "defaults")
+    made = []
+    if not os.path.isdir(src_dir):
+        return made
+    for name in sorted(os.listdir(src_dir)):
+        if not name.endswith("_presets.json"):
+            continue
+        dst = os.path.join(root, name)
+        if os.path.exists(dst):
+            continue
+        try:
+            shutil.copyfile(os.path.join(src_dir, name), dst)
+            made.append(name)
+        except Exception as e:  # never block node loading over a preset file
+            print(f"[Eric_Krea2] could not create {name} from defaults: {e}")
+    return made

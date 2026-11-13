@@ -252,6 +252,66 @@ def _detect_adapter_type(state_dict: dict) -> str:
     return "unknown"
 
 
+def _compose_lokr_factors(state_dict: dict, log_prefix: str = "[LoRA]") -> dict:
+    """Decomposed LoKr factors -> full ``lokr_w1`` / ``lokr_w2`` (2026-10-14).
+
+    LyCORIS / ai-toolkit can store a Kronecker factor as a low-rank pair
+    (``lokr_w2_a @ lokr_w2_b``, likewise ``lokr_w1_a`` / ``lokr_w1_b``). The PEFT
+    path builds full w1/w2 (huge r), so those pairs came back as 'unexpected
+    keys', w2 stayed at its zero init and the LoKr had NO effect (Klimt,
+    Beksinski). Composing them here makes both the PEFT and the direct-merge
+    path see full factors.
+
+    Scale follows ComfyUI's LoKr rule (comfy/weight_adapter/lokr.py): alpha / dim
+    only when a factor is decomposed, dim = rank of the decomposed factor
+    (w1_b's rows if w1 is decomposed, else w2_b's). It is baked into w2 and the
+    module's alpha dropped, so the later code sees a plain full LoKr at scale 1.
+    Tucker (``lokr_t2``) is for conv layers; Krea2 has none, so such modules are
+    left as they are (and reported)."""
+    if not any(k.endswith((".lokr_w1_a", ".lokr_w2_a")) for k in state_dict):
+        return state_dict
+    groups: dict = {}
+    for k in state_dict:
+        path = _adapter_module_path(k)
+        groups.setdefault(path, []).append(k)
+    out = dict(state_dict)
+    composed = tucker = 0
+    for path, keys in groups.items():
+        p = {k[len(path) + 1:]: state_dict[k] for k in keys}
+        if "lokr_w1_a" not in p and "lokr_w2_a" not in p:
+            continue
+        if "lokr_t2" in p:
+            tucker += 1
+            continue
+        dim = None
+        if "lokr_w1_a" in p and "lokr_w1_b" in p:
+            w1 = p["lokr_w1_a"].float() @ p["lokr_w1_b"].float()
+            dim = p["lokr_w1_b"].shape[0]
+        else:
+            w1 = p.get("lokr_w1")
+            w1 = w1.float() if w1 is not None else None
+        if "lokr_w2_a" in p and "lokr_w2_b" in p:
+            w2 = p["lokr_w2_a"].float() @ p["lokr_w2_b"].float()
+            dim = p["lokr_w2_b"].shape[0]
+        else:
+            w2 = p.get("lokr_w2")
+            w2 = w2.float() if w2 is not None else None
+        if w1 is None or w2 is None:
+            continue
+        scale = 1.0
+        if "alpha" in p and dim:
+            scale = float(p["alpha"].float().item()) / float(dim)
+        for s in ("lokr_w1_a", "lokr_w1_b", "lokr_w2_a", "lokr_w2_b", "alpha"):
+            out.pop(f"{path}.{s}", None)
+        # kept in float32 (a bf16 round-trip of the product costs ~2e-3); the loaders cast
+        out[f"{path}.lokr_w1"] = w1
+        out[f"{path}.lokr_w2"] = w2 * scale
+        composed += 1
+    print(f"{log_prefix} LoKR: composed decomposed factors into full w1/w2 for "
+          f"{composed} module(s)" + (f"; {tucker} Tucker (lokr_t2) module(s) left as is" if tucker else ""))
+    return out
+
+
 def _load_lokr_adapter(pipe, state_dict: dict, adapter_name: str,
                        log_prefix: str = "[LoRA]",
                        weight: float = 1.0) -> None:
@@ -270,6 +330,7 @@ def _load_lokr_adapter(pipe, state_dict: dict, adapter_name: str,
     that the base scaling is 1.0 (matching ComfyUI / LyCORIS convention).
     ``set_adapters()`` then multiplies by the user-supplied weight.
     """
+    state_dict = _compose_lokr_factors(state_dict, log_prefix)
     try:
         _load_lokr_adapter_peft(pipe, state_dict, adapter_name, log_prefix)
     except (ValueError, RuntimeError) as peft_err:
@@ -352,6 +413,9 @@ def _load_lokr_adapter_peft(pipe, state_dict: dict, adapter_name: str,
             non_alpha = [k for k in unexpected if not k.endswith(".alpha")]
             if non_alpha:
                 print(f"{log_prefix} LoKR unexpected keys: {non_alpha[:5]}...")
+                # 2026-10-14: factors PEFT did not take leave its zero-init w2 in place = a
+                # silent no-op adapter. Fail here so the caller purges it and direct-merges.
+                raise ValueError(f"LoKR: {len(non_alpha)} adapter key(s) not taken by PEFT")
         if missing:
             print(f"{log_prefix} LoKR missing keys: {missing[:5]}...")
 
@@ -1316,6 +1380,144 @@ def _apply_krea_direct_deltas(pipe, deltas, adapter_name, log_prefix="[LoRA]",
     return applied
 
 
+# -- DoRA (2026-10-14) -----------------------------------------------------------------------
+# Weight-Decomposed LoRA: W' = m * (W + B@A) / ||W + B@A||, m = the file's `dora_scale`.
+# diffusers' Krea2 loader filters `dora_scale` out with a warning and loads the rest as a plain
+# LoRA, so a DoRA silently ran without its magnitudes. PEFT's DoRA layer only holds per-OUTPUT
+# magnitudes; ai-toolkit / LyCORIS files may store them per INPUT column ((1, in), e.g.
+# 3153372_remove_clothing_censors), so we merge directly, with ComfyUI's rule
+# (comfy/weight_adapter/base.py weight_decompose): output axis when dora_scale.shape[0] ==
+# out_features, else input axis; strength s applies to the decomposed change: W + s*(W' - W).
+# Norm of the combined weight W + B@A on both axes (the DoRA paper / LyCORIS; ComfyUI uses the
+# bare W for the output axis - irrelevant for input-axis files, a small difference otherwise).
+# Sticky like the other *_direct merges: baked at the S1 weight, restored on unload.
+
+_DORA_SUFFIXES = ((".dora_scale", "m"), (".lora_A.weight", "down"), (".lora_B.weight", "up"),
+                  (".lora_down.weight", "down"), (".lora_up.weight", "up"), (".alpha", "alpha"))
+_DORA_PREFIXES = ("transformer.", "model.diffusion_model.", "diffusion_model.", "lora_unet_",
+                  "lora_transformer_", "lycoris_")
+
+
+def _file_has_dora(lora_path: str) -> bool:
+    """Header-only check (no tensors read) for `dora_scale` keys in a .safetensors file."""
+    if not str(lora_path).lower().endswith(".safetensors"):
+        return False
+    try:
+        from safetensors import safe_open
+        with safe_open(lora_path, "pt") as f:
+            return any(k.endswith("dora_scale") for k in f.keys())
+    except Exception:
+        return False
+
+
+def _dora_target(param_names, base: str):
+    """A DoRA module key (diffusers, kohya or original Krea naming) -> the transformer's weight
+    parameter name (plain or PEFT-wrapped), or None."""
+    b = base
+    for pre in _DORA_PREFIXES:
+        if b.startswith(pre):
+            b = b[len(pre):]
+            break
+    for cand in (b, _map_krea_module(b.replace(".", "_"))):
+        if not cand:
+            continue
+        for key in (f"{cand}.weight", f"{cand}.base_layer.weight"):
+            if key in param_names:
+                return key
+    return None
+
+
+def _dora_weight(W, down, up, m, alpha=None, strength: float = 1.0):
+    """The DoRA weight change for one Linear: returns D with W_new = W + D (all float32)."""
+    rank = down.shape[0]
+    scale = (float(alpha) / rank) if alpha is not None and rank else 1.0
+    Wc = W + (up @ down) * (scale * strength)
+    eps = torch.finfo(torch.float32).eps
+    if m.shape[0] == W.shape[0]:                               # per output row
+        norm = Wc.norm(dim=1, keepdim=True)
+        mag = m.reshape(W.shape[0], 1)
+    elif m.numel() == W.shape[1]:                              # per input column
+        norm = Wc.norm(dim=0, keepdim=True)
+        mag = m.reshape(1, W.shape[1])
+    else:
+        return None
+    Wd = Wc * (mag / (norm + eps))
+    return Wd - W
+
+
+def _load_dora_direct(pipe, state_dict: dict, adapter_name: str, log_prefix: str = "[LoRA]",
+                      weight: float = 1.0) -> int:
+    """Merge a DoRA file into the transformer one module at a time (a full 6144x6144 change per
+    module would be ~150 MB in float32, so nothing is collected). Originals are backed up to
+    CPU under ``_lora_backup_<adapter>`` (restored by unload_all_loras). Returns modules applied."""
+    from ._native_quant import is_quantized, merge_param_delta as _nq_merge
+    transformer = pipe.transformer
+    params = dict(transformer.named_parameters())
+    groups, other = {}, 0
+    for k, v in state_dict.items():
+        for sfx, kind in _DORA_SUFFIXES:
+            if k.endswith(sfx):
+                groups.setdefault(k[: -len(sfx)], {})[kind] = v
+                break
+        else:
+            other += 1
+    backup_key = f"_lora_backup_{adapter_name}"
+    if not hasattr(transformer, backup_key):
+        setattr(transformer, backup_key, {})
+    backup = getattr(transformer, backup_key)
+    applied = plain = skipped = 0
+    s = float(weight)
+    for base, g in groups.items():
+        if "down" not in g or "up" not in g:
+            skipped += 1
+            continue
+        key = _dora_target(params, base)
+        if key is None:
+            skipped += 1
+            continue
+        param = params[key]
+        dev = param.device
+        W = (param.dequantize() if is_quantized(param) else param.data).to(device=dev, dtype=torch.float32)
+        down = g["down"].to(device=dev, dtype=torch.float32)
+        up = g["up"].to(device=dev, dtype=torch.float32)
+        alpha = float(g["alpha"].float().item()) if "alpha" in g else None
+        if "m" in g:
+            # strength enters as ComfyUI does it: decompose at full strength, then scale the change
+            D = _dora_weight(W, down, up, g["m"].to(device=dev, dtype=torch.float32), alpha, 1.0)
+            if D is None:
+                print(f"{log_prefix}   DoRA: dora_scale {tuple(g['m'].shape)} fits neither axis of "
+                      f"{key} {tuple(W.shape)}, skipping")
+                skipped += 1
+                continue
+            D = D * s
+        else:                                                  # a plain LoRA module in a DoRA file
+            rank = down.shape[0]
+            D = (up @ down) * (((alpha / rank) if alpha is not None else 1.0) * s)
+            plain += 1
+        if tuple(D.shape) != tuple(param.shape):
+            print(f"{log_prefix}   DoRA shape mismatch for {key}: {tuple(D.shape)} vs {tuple(param.shape)}")
+            skipped += 1
+            continue
+        if _nq_merge(transformer, key, param, D):              # native-quant weight: side term
+            applied += 1
+            continue
+        if key not in backup:
+            backup[key] = param.data.detach().to("cpu", copy=True)
+        param.data.add_(D.to(dtype=param.dtype))
+        applied += 1
+        del W, D
+    if not hasattr(transformer, "peft_config"):
+        transformer.peft_config = {}
+    transformer.peft_config[adapter_name] = {"_type": "dora_direct", "_applied_modules": applied,
+                                             "_weight": s}
+    if not getattr(transformer, "_hf_peft_config_loaded", False):
+        transformer._hf_peft_config_loaded = True
+    print(f"{log_prefix} DoRA direct merge (weight={s}): applied={applied}"
+          + (f" ({plain} plain LoRA)" if plain else "") + f", skipped={skipped}"
+          + (f", {other} other key(s) ignored" if other else ""))
+    return applied
+
+
 def load_lora_with_key_fix(pipe, lora_path: str, adapter_name: str,
                           log_prefix: str = "[LoRA]",
                           weight: float = 1.0) -> None:
@@ -1335,6 +1537,12 @@ def load_lora_with_key_fix(pipe, lora_path: str, adapter_name: str,
     """
     # ── Fast path: try standard loading ──────────────────────────────
     transformer = getattr(pipe, "transformer", None)
+    # DoRA first: the pipeline loader would drop dora_scale and load it as a plain LoRA.
+    if transformer is not None and _file_has_dora(lora_path):
+        print(f"{log_prefix} DoRA file (dora_scale keys): applying with its magnitudes")
+        if _load_dora_direct(pipe, _load_state_dict(lora_path), adapter_name, log_prefix, weight) > 0:
+            return
+        print(f"{log_prefix} DoRA: nothing matched - falling back to the plain-LoRA path")
     try:
         # Filtered count: see note in _load_lora_adapter (adapter-collision fix).
         before = _live_lora_layer_count(transformer, adapter_name)

@@ -354,6 +354,158 @@ function hookCombo(node, widget) {
     };
 }
 
+// -------------------------------------------------------------------------
+// paste button (2026-10-16): clipboard -> the next empty slot
+// -------------------------------------------------------------------------
+// Accepts what the LoRA Catalog copies ("copy name", "copy as prompt tag", the path) or any file name / Civitai
+// name. The server finds the file and the weight (tag weight, else card weight, else 1.0); all three stage
+// strengths get it and the slot is switched on.
+
+async function pasteLora(node) {
+    let text = "";
+    try { text = await navigator.clipboard.readText(); } catch (e) { text = ""; }
+    if (!text || !text.trim()) {
+        text = window.prompt("Paste a LoRA name, path or <lora:...> tag:", "") || "";
+        if (!text.trim()) return;
+    }
+    let j;
+    try {
+        const r = await api.fetchApi("/eric_krea2/resolve_lora", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+        j = await r.json();
+    } catch (e) { j = { ok: false, error: String(e) }; }
+    if (!j || !j.ok) { alert(`Paste LoRA: ${j?.error || "failed"}`); return; }
+    const pairs = rowPairs(node);
+    const norm = (v) => String(v || "").replace(/\//g, "\\").toLowerCase();
+    if (pairs.some((p) => norm(p.lw.value) === norm(j.value))) { alert(`Paste LoRA: ${j.name} is already in this stack.`); return; }
+    const slot = pairs.find((p) => !p.lw.value || p.lw.value === "none");
+    if (!slot) { alert("Paste LoRA: all slots are used."); return; }
+    const opts = slot.lw.options?.values;
+    const list = Array.isArray(opts) ? opts : (typeof opts === "function" ? opts() : []);
+    const match = list.find((v) => norm(v) === norm(j.value));
+    if (list.length && !match) {
+        alert(`Paste LoRA: ${j.name} is not in this node's list (it lists the Krea2 LoRAs; restart ComfyUI after adding files).`);
+        return;
+    }
+    setComboValue(slot.lw, node, match || j.value);
+    for (const w of slot.sws) w.value = j.weight;
+    if (slot.ow) slot.ow.value = true;
+    relayout(node);
+    console.log(`[EricKrea2] pasted ${j.name} into slot ${slot.i} @ ${j.weight} (${j.weight_source})`);
+}
+
+// -------------------------------------------------------------------------
+// word options (2026-10-20): pick one of a LoRA's catalog word options per slot -> the word_options field
+// ('3: teal orange' lines). The dialog lists every used, switched-on slot.
+// -------------------------------------------------------------------------
+
+function parseWordOptions(text) {
+    const out = {};
+    for (const ln of String(text || "").split(/\r?\n/)) {
+        const m = ln.trim().match(/^(\d+)\s*:\s*(.+)$/);
+        if (m) out[+m[1]] = m[2].trim();
+    }
+    return out;
+}
+
+async function pickWords(node) {
+    const field = (node.widgets || []).find((w) => w.name === "word_options");
+    if (!field) { alert("Pick words: this node has no word_options field (restart ComfyUI after updating)."); return; }
+    const slots = rowPairs(node).filter((p) => p.lw.value && p.lw.value !== "none" && (!p.ow || p.ow.value !== false));
+    if (!slots.length) { alert("Pick words: no LoRA in the stack yet."); return; }
+    let j;
+    try {
+        const r = await api.fetchApi("/eric_krea2/word_options", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ loras: slots.map((p) => p.lw.value) }) });
+        j = await r.json();
+    } catch (e) { j = { ok: false, error: String(e) }; }
+    if (!j || !j.ok) { alert(`Pick words: ${j?.error || "failed"}`); return; }
+    ensureCss();
+    const current = parseWordOptions(field.value);
+    const back = document.createElement("div");
+    back.className = "k2ls-back";
+    const rows = slots.map((p) => {
+        const opts = (j.loras || {})[p.lw.value] || [];
+        const name = String(p.lw.value).split(/[\\/]/).pop();
+        const cur = (current[p.i] || "").toLowerCase();
+        const sel = opts.length
+            ? `<select data-slot="${p.i}" style="width:100%;background:#121317;color:#eee;border:1px solid #555;border-radius:6px;padding:5px">
+                 <option value="">(usual words)</option><option value="random"${cur === "random" ? " selected" : ""}>(random each run)</option>${opts.map((o) =>
+                 `<option value="${esc(o.name)}"${String(o.name).toLowerCase() === cur ? " selected" : ""}>${esc(o.name)}${
+                    o.text && o.text !== o.name ? "  —  " + esc(o.text) : ""}${o.default ? "  (default)" : ""}</option>`).join("")}</select>`
+            : `<span style="color:#7d8090">no word options on its card${current[p.i] ? ` (field says '${esc(current[p.i])}' - will be removed)` : ""}</span>`;
+        return `<div class="k2ls-row" style="cursor:default"><div class="k2ls-l1"><span class="k2ls-name">${p.i}. ${esc(name)}</span></div>
+                <div style="margin-top:4px">${sel}</div></div>`;
+    }).join("");
+    back.innerHTML = `
+      <div class="k2ls" role="dialog" style="width:min(640px,94vw)">
+        <div class="k2ls-top"><b style="flex:1">Word options per slot</b>
+          <button class="k2ls-btn k2ls-ok">OK</button><button class="k2ls-btn k2ls-cancel">Cancel</button></div>
+        <div class="k2ls-list">${rows}</div>
+        <div class="k2ls-foot"><span>Options are set on the LoRA's catalog card (Prompt words &gt; Word options), or read
+          from its Civitai trained words. The chosen option's words replace the slot's usual words.</span></div>
+      </div>`;
+    document.body.appendChild(back);
+    const close = () => { back.remove(); document.removeEventListener("keydown", onKey, true); };
+    const onKey = (ev) => { if (ev.key === "Escape") { ev.preventDefault(); close(); } ev.stopPropagation(); };
+    document.addEventListener("keydown", onKey, true);
+    back.addEventListener("mousedown", (ev) => { if (ev.target === back) close(); });
+    back.querySelector(".k2ls-cancel").onclick = close;
+    back.querySelector(".k2ls-ok").onclick = () => {
+        const lines = [];
+        back.querySelectorAll("select[data-slot]").forEach((s) => { if (s.value) lines.push(`${s.dataset.slot}: ${s.value}`); });
+        field.value = lines.join("\n");
+        field.callback?.(field.value, app.canvas, node);
+        node.setDirtyCanvas(true, true);
+        close();
+    };
+}
+
+// -------------------------------------------------------------------------
+// word-option badge (2026-10-26): a switched-on slot whose LoRA has word options but none chosen gets an
+// amber dot left of its LoRA row; clicking the dot opens Pick words. Canvas-only - adds no widget.
+// -------------------------------------------------------------------------
+const OPT_CACHE = {};            // lora name -> number of word options on its card
+
+async function refreshOptionBadges(node) {
+    const names = rowPairs(node).map((p) => p.lw.value).filter((v) => v && v !== "none" && !(v in OPT_CACHE));
+    if (names.length) {
+        try {
+            const r = await api.fetchApi("/eric_krea2/word_options", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ loras: names }) });
+            const j = await r.json();
+            if (j && j.ok) for (const n of names) OPT_CACHE[n] = ((j.loras || {})[n] || []).length;
+        } catch (_e) { /* the badge is optional */ }
+    }
+    node.setDirtyCanvas?.(true, false);
+}
+
+function badgeSlots(node) {
+    const field = (node.widgets || []).find((w) => w.name === "word_options");
+    const chosen = parseWordOptions(field ? field.value : "");
+    return rowPairs(node).filter((p) => p.lw.value && p.lw.value !== "none" && !p.lw.__k2hidden
+        && (!p.ow || p.ow.value !== false) && (OPT_CACHE[p.lw.value] || 0) > 0 && !chosen[p.i]);
+}
+
+function widgetHeight() {
+    return (globalThis.LiteGraph && globalThis.LiteGraph.NODE_WIDGET_HEIGHT) || 20;
+}
+
+function drawOptionBadges(node, ctx) {
+    const h = widgetHeight();
+    for (const p of badgeSlots(node)) {
+        if (p.lw.last_y == null) continue;
+        ctx.save();
+        ctx.fillStyle = "#f0a020";
+        ctx.beginPath();
+        ctx.arc(7, p.lw.last_y + h / 2, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
 app.registerExtension({
     name: "Eric.Krea2.MultiLoRA",
 
@@ -386,16 +538,47 @@ app.registerExtension({
             p.lw.callback = function (v, ...a) {
                 const r = orig ? orig.call(this, v, ...a) : undefined;
                 relayout(node);
+                refreshOptionBadges(node);
                 return r;
             };
         }
+
+        // appended last and not saved, so saved widget positions never shift
+        const pb = node.addWidget("button", "paste_lora", null, () => pasteLora(node), { serialize: false });
+        if (pb) { pb.label = "Paste LoRA from clipboard"; pb.serialize = false; }
+        // 2026-10-20: choose word options per slot (fills the word_options field)
+        const wb = node.addWidget("button", "pick_words", null, () => pickWords(node), { serialize: false });
+        if (wb) { wb.label = "Pick words (word options per slot)"; wb.serialize = false; }
+
+        // word-option badges (2026-10-26)
+        const origDraw = node.onDrawForeground;
+        node.onDrawForeground = function (ctx) {
+            const r = origDraw ? origDraw.apply(this, arguments) : undefined;
+            try { if (!(this.flags && this.flags.collapsed)) drawOptionBadges(this, ctx); } catch (_e) { /* never break drawing */ }
+            return r;
+        };
+        const origDown = node.onMouseDown;
+        node.onMouseDown = function (e, pos, canvas) {
+            try {
+                if (pos && pos[0] < 14) {
+                    const h = widgetHeight();
+                    if (badgeSlots(this).some((p) => p.lw.last_y != null && Math.abs(pos[1] - (p.lw.last_y + h / 2)) <= h / 2)) {
+                        pickWords(this);
+                        return true;
+                    }
+                }
+            } catch (_e) { /* fall through */ }
+            return origDown ? origDown.apply(this, arguments) : undefined;
+        };
 
         const origConfigure = node.onConfigure;
         node.onConfigure = function () {
             const r = origConfigure ? origConfigure.apply(this, arguments) : undefined;
             setTimeout(() => relayout(node), 0);
+            setTimeout(() => refreshOptionBadges(node), 0);
             return r;
         };
         setTimeout(() => relayout(node), 0);
+        setTimeout(() => refreshOptionBadges(node), 0);
     },
 });

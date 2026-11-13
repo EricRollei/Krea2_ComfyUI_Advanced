@@ -83,21 +83,26 @@ def fit_body(body, budget, count):
     return _cut_end(body, budget, count)
 
 
-def join_triggers(body, tail, mode):
+def join_triggers(body, tail, mode, join="comma"):
     body = (body or "").strip()
     if not body:
         return tail
+    if str(join).lower() == "period":          # 2026-10-29: the tail is already sentences ("trigA. trigB.")
+        if mode == "prepend":
+            return f"{tail} {body}"
+        body = body.rstrip(",;:").rstrip()
+        return f"{body} {tail}" if body[-1:] in ".!?" else f"{body}. {tail}"
     if mode == "prepend":
         return f"{tail}, {body}"
     body = body.rstrip(",;:").rstrip()
     return f"{body} {tail}" if body[-1:] in ".!?" else f"{body}, {tail}"
 
 
-def merge_within_budget(prompt, tail, mode, pipe, log_prefix="[EricKrea2-Triggers]"):
+def merge_within_budget(prompt, tail, mode, pipe, log_prefix="[EricKrea2-Triggers]", join="comma"):
     """Merge `tail` (trigger words) into `prompt` (prepend/append) so the result fits Krea 2's
     prompt budget, shortening the prompt body - never the triggers. Falls back to a plain merge
     when no tokenizer is available."""
-    merged = join_triggers(prompt, tail, mode)
+    merged = join_triggers(prompt, tail, mode, join)
     count, budget = prompt_counter(pipe) if pipe is not None else (None, 0)
     if count is None:
         return merged
@@ -108,7 +113,7 @@ def merge_within_budget(prompt, tail, mode, pipe, log_prefix="[EricKrea2-Trigger
         room = budget - (n - count(prompt))           # tokens left for the body
         for _ in range(3):                            # joint tokenization can differ by a token or two
             body, dropped = fit_body(prompt, max(0, room), count)
-            out = join_triggers(body, tail, mode)
+            out = join_triggers(body, tail, mode, join)
             m = count(out)
             if m <= budget:
                 print(f"{log_prefix} prompt + triggers was {n} tokens (Krea 2 reads {budget}): shortened the "

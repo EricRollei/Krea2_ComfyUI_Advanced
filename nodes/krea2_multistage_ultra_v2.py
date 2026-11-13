@@ -78,6 +78,8 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
         merged_optional = {}
         merged_optional.update(preset_widget)
         merged_optional.update(base.get("optional", {}))
+        # `sampling` socket (2026-10-23) re-added AFTER `sweep` so sweep keeps its input slot.
+        _sampling_sock = merged_optional.pop("sampling", None)
         # Sweep input appended LAST (2026-07-24, spec_sweep_system_v2_final): a
         # connection-type socket (no widget value), so existing saved workflows'
         # positional widget_values are untouched either way.
@@ -88,6 +90,8 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                        "contact sheet + sweep_manifest.json under output/sweeps/<id>/, and the "
                        "image output becomes the batch of cells. Panel values are the base "
                        "recipe; each combo overrides only its swept keys."})
+        if _sampling_sock is not None:
+            merged_optional["sampling"] = _sampling_sock
         base["optional"] = merged_optional
         return base
 
@@ -156,6 +160,23 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                 from .. import _settings
                 settings = _settings.merge(settings, _settings.wrap("sigmas", section))
 
+        # 2c) Sampling-extras bundle (Hybrid Sigma Handoff node, 2026-10-23) -> "sampling" section,
+        #     so the image metadata carries the handoff / SDE band / churn form it was made with.
+        _samp = kwargs.get("sampling")
+        if isinstance(_samp, dict) and _samp:
+            from .. import _settings
+            settings = _settings.merge(settings, _settings.wrap("sampling", dict(_samp)))
+
+        # 2d) Negative Guidance bundle (NAG / NegPiP, 2026-11-11) -> "guidance" section, so a saved
+        #     image or sweep cell records the negatives and settings it was made with.
+        _guide = kwargs.get("guidance")
+        if isinstance(_guide, dict) and _guide:
+            _gsec = {k: v for k, v in _guide.items()
+                     if not str(k).startswith("_") and isinstance(v, (str, int, float, bool))}
+            if _gsec:
+                from .. import _settings
+                settings = _settings.merge(settings, _settings.wrap("guidance", _gsec))
+
         # 3) Sweep branch (2026-07-24): if a plan is wired, execute every combo
         #    inside THIS queue item. Otherwise run the single inherited engine
         #    pass exactly as before.
@@ -199,6 +220,13 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                 ck_name = os.path.splitext(os.path.basename(str(v)))[0]
                 break
         ck_name = ck_name or "krea2"
+        # checkpoint sweeps (2026-11-08): Turbo only; the folder is named for the number of checkpoints
+        ck_list = list(plan.get("checkpoints") or [])
+        if ck_list:
+            if pipe_dict.get("is_distilled") is False:
+                raise ValueError("Ultra V2 checkpoint sweep: Turbo checkpoints only - the Component "
+                                 "Loader's base folder is not a distilled (Turbo) model")
+            ck_name = f"{len(ck_list)}ckpts"
 
         try:
             import folder_paths
@@ -251,6 +279,16 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
         except Exception:
             pass
 
+        # 2026-11-11: carry the guidance (NAG / NegPiP) and sampling (Hybrid Sigma Handoff) sections
+        # into every cell's chunk too - before this, sweep cells did not record them.
+        try:
+            _bd = json.loads(base_settings)
+            for _sec in ("guidance", "sampling"):
+                if _sec in _bd:
+                    extra_sections[_sec] = _bd[_sec]
+        except Exception:
+            pass
+
         def _settings_with_sections(resolved):
             s = self.serialize_settings(resolved)
             if extra_sections:
@@ -284,20 +322,54 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
         # sequential within one cell). Reserved non-widget keys (lora_file,
         # lora_strength, lora_baseline, lora_target, prompt, sigma_profile)
         # are popped here - they are plan vocabulary, not engine kwargs.
+        # 2026-10-09: lora_stack / lora_mult (lora_mode=stacks) likewise.
         cell_ctx = {}
         lora_cfg = plan.get("lora") or {}
         base_stack = list(pipe_dict.get("lora_stack") or [])
         _sigma_node = None
 
+        _by_name = {}
+
+        def _lora_by_file_name(name):
+            """Fallback (2026-10-09): a bare file name or stem ('3160971_style_v1') found anywhere under the
+            loras folders, so sweep lines survive LoRAs being moved between subfolders. One walk per sweep;
+            two files with that name = an error naming both (write the folder path to choose)."""
+            import os as _os
+            if not _by_name:
+                import folder_paths
+                for _root in folder_paths.get_folder_paths("loras"):
+                    for _dir, _sub, _files in _os.walk(_root):
+                        for _f in _files:
+                            if _f.lower().endswith((".safetensors", ".pt", ".ckpt", ".bin")):
+                                _full = _os.path.join(_dir, _f)
+                                for _key in (_f.lower(), _os.path.splitext(_f)[0].lower()):
+                                    _by_name.setdefault(_key, []).append(_full)
+                _by_name["\0walked"] = []
+            hits = _by_name.get(str(name).strip().lower(), [])
+            if len(hits) > 1:
+                raise ValueError(f"sweep lora: '{name}' matches {len(hits)} files - write its folder path: "
+                                 + "; ".join(hits[:4]))
+            return hits[0] if hits else None
+
         def _resolve_lora_entry(name_or_path, strength):
             from .._lora_utils import get_lora_full_path
+            from .._catalog_lookup import split_option
             from .krea2_lora import _sanitize_adapter_name
             import os as _os
+            # 'name #option' (2026-10-20): the LoRA is 'name'; the option picks its catalog word option
+            name_or_path, word_option = split_option(name_or_path)
             path = None
             if _os.path.isfile(str(name_or_path)):
                 path = str(name_or_path)
             else:
                 path = get_lora_full_path(str(name_or_path))
+            if not path:
+                path = _lora_by_file_name(str(name_or_path))
+            if not path:
+                # Civitai download names (version-id prefix / _bf16 suffix left off), as the Prompt LoRA Tags node
+                # and the random picks resolve them (2026-10-16). Ambiguous names raise with the candidates.
+                from .._lora_names import find_lora
+                path = find_lora(str(name_or_path))
             if not path:
                 raise ValueError(f"sweep lora: '{name_or_path}' not found (loras folder or full path)")
             s = float(strength)
@@ -305,7 +377,7 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                     "lora_name": str(name_or_path),
                     "adapter_name": "sweep_" + _sanitize_adapter_name(path),
                     "strength": s, "weight_s1": s, "weight_s2": s, "weight_s3": s,
-                    "ephemeral": True}
+                    "ephemeral": True, "word_option": word_option}
 
         def _ladder_stack(target, strength):
             import copy as _copy
@@ -338,6 +410,9 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
             ls = ck.pop("lora_strength", None)
             lb = ck.pop("lora_baseline", None)
             lt = ck.pop("lora_target", None)
+            lstk = ck.pop("lora_stack", None)     # stacks mode (2026-10-09): the line text
+            lmult = ck.pop("lora_mult", None)      # optional multiplier on all its weights
+            tjoin = ck.pop("trigger_join", None)   # TEMPORARY sweep axis trigger_joins (2026-10-29): comma | period
             pr = ck.pop("prompt", None) if "prompt" in overrides else None
             # Swept-schedule precedence (2026-07-28): a cell that explicitly
             # sweeps a stage's schedule disables the wired bundle for that
@@ -382,7 +457,8 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                     cell_ctx["sigmas"] = {k2: v2 for k2, v2 in bundle.items()
                                           if k2 in ("s1", "s2", "s3") and
                                           isinstance(v2, dict) and v2.get("enabled", True)}
-            if lora_cfg and (lb or lf is not None or (lt is not None and ls is not None)):
+            if lora_cfg and (lb or lf is not None or lstk is not None
+                             or (lt is not None and ls is not None)):
                 if lb:
                     # baseline: ladder -> panel stack as declared; bakeoff ->
                     # no LoRA, unless keep_panel_stack (then the panel stack
@@ -390,6 +466,20 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                     stack = (list(base_stack)
                              if (lora_cfg.get("mode") == "strength_ladder"
                                  or lora_cfg.get("keep_panel_stack")) else [])
+                elif lstk is not None:
+                    # stacks: every LoRA of the line, its own per-stage weights x the
+                    # optional multiplier; ephemeral "sweep_" entries like bakeoff, so
+                    # trigger merge and per-cell cleanup work unchanged.
+                    from .krea2_sweep import parse_stack_line
+                    m = float(lmult) if lmult is not None else 1.0
+                    entries = []
+                    for _name, _ws in parse_stack_line(lstk):
+                        _e = _resolve_lora_entry(_name, _ws[0] * m)
+                        _e.update({"weight_s1": _ws[0] * m, "weight_s2": _ws[1] * m,
+                                   "weight_s3": _ws[2] * m})
+                        entries.append(_e)
+                    stack = (list(base_stack) + entries
+                             if lora_cfg.get("keep_panel_stack") else entries)
                 elif lora_cfg.get("mode") == "bakeoff":
                     entry = _resolve_lora_entry(lf, ls)
                     stack = (list(base_stack) + [entry]
@@ -405,23 +495,31 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                 # untouched; the panel prompt is presumed already correct for
                 # the panel stack). Cached DB lookup; non-fatal on failure.
                 # A changed prompt forces re-encode for this cell.
-                trig_mode = str(lora_cfg.get("triggers", "off"))
+                from .krea2_lora import canon_trigger_mode
+                trig_mode = canon_trigger_mode(lora_cfg.get("triggers", "off"))
                 if trig_mode != "off":
                     try:
-                        from .._trigger_words import (get_trigger_words,
-                                                      merge_triggers_into_prompt)
-                        trigs, _seen = [], set()
-                        for e in stack:
-                            if str(e.get("adapter_name", "")).startswith("sweep_"):
-                                for t in get_trigger_words(e["path"]):
-                                    if t and t.lower() not in _seen:
-                                        _seen.add(t.lower())
-                                        trigs.append(t)
+                        # 2026-10-16: one shared function (_sweep_words) so the Sweep Plan preview shows exactly
+                        # these words. trigger = one per LoRA; full / saved pick = merged for the stack.
+                        from .._trigger_words import merge_triggers_into_prompt
+                        from .._sweep_words import cell_words
+                        from .._prompt_merge import report_lines
+                        trigs, _srcs, _rep = cell_words(
+                            [e for e in stack if str(e.get("adapter_name", "")).startswith("sweep_")],
+                            trig_mode, ck_name, str(ck.get("prompt", "") or ""))
+                        for _ln in report_lines(_rep or {}):
+                            print(f"[EricKrea2-MS] [sweep] prompt words: {_ln}")
+                        if (_rep or {}).get("conflicts"):
+                            cell_ctx["sweep_word_conflicts"] = _rep["conflicts"]
+                        if _srcs:
+                            cell_ctx["sweep_trigger_source"] = _srcs
                         if trigs:
                             cur = str(ck.get("prompt", "") or "")
                             merged = merge_triggers_into_prompt(
-                                cur, trigs, trig_mode,
-                                pipe=(ck.get("krea2_pipeline") or {}).get("pipeline"))
+                                cur, trigs, "prepend" if trig_mode in ("catalog", "recipe", "full") else trig_mode,
+                                pipe=(ck.get("krea2_pipeline") or {}).get("pipeline"), join=str(tjoin or "comma"))
+                            if tjoin:
+                                cell_ctx["sweep_trigger_join"] = tjoin
                             if merged != cur:
                                 ck["prompt"] = merged
                                 ck["prompt_conditioning"] = None
@@ -430,6 +528,44 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                     except Exception as _te:
                         print(f"[EricKrea2-MS] [sweep] trigger lookup failed "
                               f"(non-fatal): {_te}")
+            # <lora:name:w> tags in the cell's prompt (2026-10-15): stripped from the text and loaded into THIS
+            # cell's stack. A tag for a LoRA already in the stack replaces its weights (Eric's call). Tags that
+            # match no file are reported and skipped - the cell still runs.
+            _ptxt = ck.get("prompt")
+            if isinstance(_ptxt, str) and "<lora:" in _ptxt.lower():
+                from .krea2_prompt_lora_tags import parse_tags
+                from .._lora_names import find_lora
+                from .krea2_lora import _sanitize_adapter_name
+                import os as _os
+                _clean, _tags = parse_tags(_ptxt)
+                _pd = dict(ck.get("krea2_pipeline") or pipe_dict)
+                _stack = [dict(e) for e in (_pd.get("lora_stack") or [])]
+                _done, _missing = [], []
+                for _name, (_w1, _w2, _w3), _tag in _tags:
+                    try:
+                        _path, _why = find_lora(_name), f"no LoRA named '{_name}'"
+                    except ValueError as _amb:
+                        _path, _why = None, str(_amb)
+                    if not _path:
+                        _missing.append(f"{_tag}: {_why}")
+                        continue
+                    _hit = next((e for e in _stack if _os.path.normcase(str(e.get("path", "")))
+                                 == _os.path.normcase(_path)), None)
+                    if _hit is None:
+                        _hit = {"path": _path, "filename": _os.path.basename(_path), "lora_name": _name,
+                                "adapter_name": "sweep_tag_" + _sanitize_adapter_name(_path), "ephemeral": True}
+                        _stack.append(_hit)
+                    _hit.update({"strength": _w1, "weight_s1": _w1, "weight_s2": _w2, "weight_s3": _w3})
+                    _done.append(_tag)
+                if _missing:
+                    print("[EricKrea2-Sweep] prompt <lora:> tag(s) not loaded: " + "; ".join(_missing))
+                _pd["lora_stack"] = _stack
+                ck["krea2_pipeline"] = _pd
+                ck["prompt"] = _clean
+                ck["prompt_conditioning"] = None
+                cell_ctx["lora"] = _stack
+                cell_ctx["sweep_prompt"] = _clean
+                cell_ctx["prompt_lora_tags"] = {"loaded": _done, "not_found": _missing}
             return ck
 
         def _settings_with_cell(resolved):
@@ -463,11 +599,85 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
             # does not vary Stage 1 and is ignored here.
             return all(str(k).startswith(("s2_", "s3_"))
                        for k in overrides
-                       if not str(k).startswith("_") and k != "seed")
+                       if not str(k).startswith("_") and k not in ("seed", "checkpoint"))
+
+        # Checkpoint sweeps (2026-11-08). Cells carry 'checkpoint' (a models/diffusion_models name or a
+        # full path) and arrive grouped by checkpoint. On a change: unload everything, then run the
+        # Component Loader's own load() with the original loader settings and only the transformer
+        # changed - every format / quantization / compute path behaves as when loading by hand.
+        # The Stage 1 cache is per checkpoint (cleared on a switch).
+        ck_state = {"current": None, "failed": {}}
+
+        def _ckpt_path(name):
+            if os.path.isabs(str(name)) and os.path.exists(str(name)):
+                return str(name)
+            try:
+                import folder_paths
+                p = folder_paths.get_full_path("diffusion_models", str(name))
+            except Exception:
+                p = None
+            if not p:
+                raise RuntimeError(f"checkpoint '{name}' not found in models/diffusion_models")
+            return p
+
+        def _same_path(a, b):
+            na = os.path.normcase(os.path.abspath(str(a))) if a else ""
+            nb = os.path.normcase(os.path.abspath(str(b))) if b else ""
+            return bool(na) and na == nb
+
+        def _switch_checkpoint(name):
+            if ck_state["current"] == name:
+                return
+            if name in ck_state["failed"]:
+                raise RuntimeError(ck_state["failed"][name])
+            full = _ckpt_path(name)
+            old = kwargs.get("krea2_pipeline") or {}
+            if (ck_state["current"] is None and old.get("pipeline") is not None
+                    and _same_path(full, old.get("transformer_path"))):
+                ck_state["current"] = name          # already loaded - no reload
+                print(f"[EricKrea2-MS] [sweep] checkpoint: {name} (already loaded)")
+                return
+            try:
+                largs = dict(json.loads(old.get("loader_settings") or "{}").get("loader") or {})
+            except Exception:
+                largs = {}
+            if not largs.get("base_pipeline_path"):
+                raise RuntimeError("checkpoint sweep: the pipeline carries no loader settings - "
+                                   "use the Eric Krea2 Component Loader")
+            from .krea2_unload import EricKrea2UnloadModels
+            from .krea2_component_loader import EricKrea2ComponentLoader
+            print(f"[EricKrea2-MS] [sweep] checkpoint -> {name}: unloading the current model")
+            s1_cache["lat"] = None
+            ck_state["current"] = None
+            EricKrea2UnloadModels().unload(krea2_pipeline=old, also_clear_module_caches=True,
+                                     aggressive_teardown=True, also_unload_comfy_models=False,
+                                     verbose=False)
+            largs.update(transformer_path=full, transformer_pick="none", loader_preset="custom",
+                         keep_in_vram=True)
+            try:
+                handle, lsettings = EricKrea2ComponentLoader().load(**largs)
+            except Exception as e:
+                ck_state["failed"][name] = (f"checkpoint '{name}' failed to load: "
+                                            f"{type(e).__name__}: {e}")
+                raise RuntimeError(ck_state["failed"][name])
+            if handle.get("is_distilled") is False:
+                ck_state["failed"][name] = f"checkpoint '{name}': not a Turbo (distilled) model"
+                raise RuntimeError(ck_state["failed"][name])
+            new = dict(old)            # keeps upstream keys (e.g. the panel's lora_stack)
+            new.update(handle)
+            kwargs["krea2_pipeline"] = new
+            try:
+                extra_sections["loader"] = json.loads(lsettings).get("loader", extra_sections.get("loader"))
+            except Exception:
+                pass
+            ck_state["current"] = name
 
         def run_one(overrides):
+            if "checkpoint" in overrides:
+                _switch_checkpoint(overrides["checkpoint"])
             ck = dict(kwargs)
             ck.update(overrides)
+            ck.pop("checkpoint", None)
             ck = _apply_v2_keys(ck, overrides)
             reused = False
             if (s1_cache["lat"] is not None and reuse_ok_base
@@ -481,7 +691,30 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
                 cand = res[4]  # stage1_latent output
                 if isinstance(cand, dict) and cand.get("packed") is not None:
                     s1_cache["lat"] = cand
-            return res[0][0].detach().float().cpu().numpy(), {"s1_reused": reused}
+            # what this cell actually ran, for the CSV / review workbook (2026-10-15)
+            from .._sweep_review import stack_text
+            extra = {"s1_reused": reused,
+                     "loras": stack_text((ck.get("krea2_pipeline") or {}).get("lora_stack") or [])}
+            if cell_ctx.get("prompt_lora_tags"):
+                extra["prompt_lora_tags"] = cell_ctx["prompt_lora_tags"]
+            if cell_ctx.get("sweep_triggers"):           # the words added for the swept LoRAs (2026-10-16)
+                extra["words"] = ", ".join(str(t) for t in cell_ctx["sweep_triggers"])
+            if cell_ctx.get("sweep_word_conflicts"):
+                extra["word_conflicts"] = "; ".join(cell_ctx["sweep_word_conflicts"])
+            try:                                   # NegPiP record for this cell (2026-11-11)
+                from .. import _edit_text as _et
+                _npi = _et.take_negpip_info()
+                if _npi:
+                    cell_ctx["negpip"] = _npi
+                    extra["negpip"] = _npi.get("summary", "")
+            except Exception:
+                pass
+            try:                                   # trajectory probe (2026-10-22)
+                from .. import _traj_probe
+                extra.update(_traj_probe.sweep_fields())
+            except Exception:
+                pass
+            return res[0][0].detach().float().cpu().numpy(), extra
 
         def resolve_values(overrides):
             merged = dict(defaults)
@@ -491,16 +724,48 @@ class EricKrea2MultistageUltraV2(EricKrea2MultistageUltra):
             for k, v in overrides.items():
                 if not str(k).startswith("_"):
                     merged[k] = v
-            return {k: merged[k] for k in sorted(merged) if k in valid or k == "seed"}
+            out = {k: merged[k] for k in sorted(merged) if k in valid or k == "seed"}
+            try:   # sampling extras (2026-10-23): record the effective values per cell
+                from .. import _sampling_extras as _sxm
+                if kwargs.get("sampling") is not None or any(k in overrides for k in _sxm.KEYS):
+                    out.update(_sxm.resolve({k: overrides.get(k) for k in _sxm.KEYS},
+                                            kwargs.get("sampling")))
+            except Exception:
+                pass
+            return out
 
-        out = _sweep_core.run_sweep(
-            plan, run_one=run_one, resolve_values=resolve_values,
-            settings_string=_settings_with_cell,
-            out_root=out_root, checkpoint_name=ck_name,
-            base_seed=int(kwargs.get("seed", 0) or 0),
-            interrupt_check=interrupt_check, interrupt_exc=interrupt_exc,
-            progress=(lambda i, n: pbar.update_absolute(i)) if pbar else None,
-            log=lambda *a: print("[EricKrea2-MS]", *a))
+        try:
+            out = _sweep_core.run_sweep(
+                plan, run_one=run_one, resolve_values=resolve_values,
+                settings_string=_settings_with_cell,
+                out_root=out_root, checkpoint_name=ck_name,
+                base_seed=int(kwargs.get("seed", 0) or 0),
+                interrupt_check=interrupt_check, interrupt_exc=interrupt_exc,
+                progress=(lambda i, n: pbar.update_absolute(i)) if pbar else None,
+                log=lambda *a: print("[EricKrea2-MS]", *a))
+        finally:
+            # checkpoint sweeps (2026-11-08, Eric's call): leave ALL models unloaded afterwards -
+            # also after an interrupt or error - so the next queue starts clean.
+            if any("checkpoint" in c for c in plan.get("combos", [])):
+                try:
+                    from .krea2_unload import EricKrea2UnloadModels
+                    print("[EricKrea2-MS] [sweep] checkpoint sweep done - unloading all models")
+                    EricKrea2UnloadModels().unload(krea2_pipeline=kwargs.get("krea2_pipeline"),
+                                             also_clear_module_caches=True, aggressive_teardown=True,
+                                             also_unload_comfy_models=True, verbose=True)
+                except Exception as e:
+                    print(f"[EricKrea2-MS] [sweep] unload after checkpoint sweep failed: {e}")
+
+        # share sheets (2026-10-16): labelled strips / singles for posting. Never breaks the sweep.
+        share = (plan.get("share") or {}) if isinstance(plan, dict) else {}
+        if str(share.get("mode", "off")) != "off" and out.get("sweep_dir"):
+            try:
+                from .._sweep_sheets import make_sheets
+                make_sheets(out["sweep_dir"], mode=share.get("mode", "strips"),
+                            background=share.get("background", "black"),
+                            log=lambda *a: print("[EricKrea2-MS]", *a))
+            except Exception as e:
+                print(f"[EricKrea2-MS] share sheets skipped: {e}")
 
         ok = [c for c in out["cells"] if c is not None]
         if ok:

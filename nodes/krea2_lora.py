@@ -39,6 +39,90 @@ from .._lora_utils import (
 from .._trigger_words import get_trigger_words, merge_triggers_into_prompt
 
 
+# 'catalog' trigger mode (2026-10-13): one trigger per LoRA from its LoRA Catalog card, prepended.
+# 2026-10-16: four plain names appended (the list is append-only: saved workflows keep their values, and the
+# JS shows only the four new ones, turning off / catalog / recipe into none / trigger / saved pick on load):
+#   none        no words                                  (= off)
+#   trigger     the LoRA's main trigger from its card      (= catalog; may be several words, e.g. 'retro artstyle')
+#   full        its whole recipe: official words + trigger + style phrase (no picks)
+#   saved pick  your pick for this checkpoint, else a trigger test's pick, else full's trigger + phrase (= recipe)
+# prepend / append (every looked-up Civitai trigger word) still work for old workflows.
+TRIGGER_MODES = ["off", "prepend", "append", "catalog", "recipe",     # recipe appended 2026-10-15
+                 "none", "trigger", "full", "saved pick"]           # 2026-10-16
+TRIGGER_LABELS = ["none", "trigger", "full", "saved pick"]
+_CANON = {"none": "off", "trigger": "catalog", "saved pick": "recipe", "saved_pick": "recipe"}
+TRIGGER_TOOLTIP = ("Words added to the prompt for each LoRA, from the LoRA Catalog:\n"
+                   "none = nothing.\n"
+                   "trigger = the LoRA's main trigger from its card (your priority trigger first; can be a few "
+                   "words, e.g. 'retro artstyle illustration'). Enough on the base model, often too weak on "
+                   "fine-tunes.\n"
+                   "full = the whole recipe: official trained words + trigger + style phrase (no card recipe: "
+                   "all its card triggers). Strongest; uses more of the prompt.\n"
+                   "saved pick = the words chosen for the loaded checkpoint - yours (card editor / Sweeps "
+                   "page), else a trigger test's - else trigger + style phrase. A pick of 'no words' adds "
+                   "nothing on purpose.\n"
+                   "With two or more LoRAs, full and saved pick are merged into one tidy list (repeats "
+                   "dropped, length shared by weight, clashes reported). Words already in the prompt are not "
+                   "added twice; all are put in front of the prompt.")
+
+
+def canon_trigger_mode(mode) -> str:
+    """The internal name of a trigger mode: off | catalog | recipe | full | prepend | append."""
+    m = str(mode or "off").strip()
+    return _CANON.get(m, m)
+
+
+def checkpoint_of(pipeline):
+    """The loaded checkpoint's name, as the sweep names it (transformer file stem) - for per-checkpoint picks."""
+    pd = pipeline if isinstance(pipeline, dict) else {}
+    for key in ("transformer_path", "model_name", "model_path"):
+        v = pd.get(key)
+        if v:
+            return os.path.splitext(os.path.basename(str(v)))[0]
+    return ""
+
+
+def resolve_triggers(lora_path, mode, fetch, force, checkpoint=""):
+    """(triggers, merge mode, source) for one LoRA. catalog: [the card's first active trigger] (or the first looked-up
+    trigger when the LoRA has no card trigger), merged by prepending; recipe (2026-10-15): [the LoRA Catalog's prompt
+    words for this checkpoint] - your pick, a trigger test's pick, else the recipe default - prepended, and an empty
+    pick adds nothing on purpose; no catalog words at all: as catalog. Other modes: the usual lookup, unchanged."""
+    mode = canon_trigger_mode(mode)
+    if mode == "full":
+        try:
+            from .._catalog_lookup import card_full
+            words, src = card_full(lora_path)
+        except Exception as e:
+            print(f"[EricKrea2-LoRA] catalog full words lookup failed (non-fatal): {e}")
+            words, src = "", "none"
+        if words:
+            return [words], "prepend", f"full ({src})"
+        looked = get_trigger_words(lora_path, force=force) if fetch else []
+        return ([", ".join(looked)] if looked else []), "prepend", "full (civitai words)" if looked else "none"
+    if mode == "recipe":
+        try:
+            from .._catalog_lookup import card_prompt
+            words, src = card_prompt(lora_path, checkpoint)
+        except Exception as e:
+            print(f"[EricKrea2-LoRA] catalog prompt words lookup failed (non-fatal): {e}")
+            words, src = "", "none"
+        if src != "none":
+            return ([words] if words else []), "prepend", f"recipe ({src})"
+        mode = "catalog"
+    if mode == "catalog":
+        try:
+            from .._catalog_lookup import card_trigger
+            found = card_trigger(lora_path)
+        except Exception as e:                       # no catalog: fall back to the lookup
+            print(f"[EricKrea2-LoRA] catalog trigger lookup failed (non-fatal): {e}")
+            found = ""
+        if found:
+            return [found], "prepend", "card"
+        looked = get_trigger_words(lora_path, force=force) if fetch else []
+        return looked[:1], "prepend", "lookup" if looked else "none"
+    return (get_trigger_words(lora_path, force=force) if fetch else []), mode, "lookup"
+
+
 def _sanitize_adapter_name(lora_path: str) -> str:
     # PEFT/PyTorch ModuleDict keys cannot contain '.', so sanitize the stem.
     stem = os.path.splitext(os.path.basename(lora_path))[0]
@@ -121,10 +205,9 @@ class EricKrea2ApplyLoRA:
                     "tooltip": "Look up this LoRA's trigger words (safetensors metadata / Civitai, "
                                "cached locally in Eric_Krea2/data/lora_triggers.json - only the first "
                                "lookup per file touches the network). Fills the trigger_words output."}),
-                "add_triggers": (["off", "prepend", "append"], {"default": "off",
-                    "tooltip": "Merge the found trigger words into the prompt passthrough output. "
-                               "off = prompt passes through unchanged (use the trigger_words output "
-                               "manually). Triggers already present in the prompt are not duplicated."}),
+                "add_triggers": (TRIGGER_MODES, {"default": "none",
+                    "tooltip": TRIGGER_TOOLTIP + "\nThe words go into the 'prompt' output (connect your "
+                               "prompt to the prompt input)."}),
                 "force_refetch": ("BOOLEAN", {"default": False,
                     "tooltip": "Bypass the local trigger cache and re-query Civitai for this LoRA "
                                "(use if triggers were updated on Civitai or a lookup failed). "
@@ -134,6 +217,8 @@ class EricKrea2ApplyLoRA:
                                "'prompt' output onward; with add_triggers on, trigger words are "
                                "merged in. Without a connection the prompt output is just the "
                                "triggers (or empty)."}),
+                # Appended LAST 2026-10-29 (the socket above takes no widget value).
+                "trigger_join": (["comma", "period"], {"default": "comma", "tooltip": "How the trigger words join the prompt (when add_triggers is on). comma: 'trigA, trigB, your prompt' (the behaviour before 2026-10-29). period: each LoRA's words become their own sentence - 'trigA. trigB. Your prompt' - the way many Civitai prompts start; it may stop a trigger being read as text to draw (being tested with the Sweep Plan trigger_joins axis)."}),
             },
         }
 
@@ -142,7 +227,7 @@ class EricKrea2ApplyLoRA:
                    ephemeral=True, lora_path_override="", enabled=True,
                    apply_lora_preset="custom",
                    fetch_triggers=True, add_triggers="off", force_refetch=False,
-                   prompt=""):
+                   prompt="", trigger_join="comma"):
         # Headless / API-run fallback: apply a named preset over the panel values
         # (the JS normally writes these into the visible widgets at edit time).
         if apply_lora_preset and apply_lora_preset != "custom":
@@ -166,6 +251,7 @@ class EricKrea2ApplyLoRA:
                 _vals["fetch_triggers"], _vals["add_triggers"], _vals["force_refetch"])
             print(f"[EricKrea2-LoRA] apply_lora_preset '{apply_lora_preset}': applied {n} field(s).")
 
+        add_triggers = canon_trigger_mode(add_triggers)
         if not enabled:
             print("[EricKrea2-LoRA] Apply LoRA is toggled OFF - passing pipeline through.")
             return (pipeline, _stack_settings(pipeline.get("lora_stack", [])),
@@ -214,15 +300,18 @@ class EricKrea2ApplyLoRA:
         new_pipeline["lora_stack"] = stack
 
         # Trigger words (cached lookup; network only on first sight of a file).
-        triggers = []
-        if fetch_triggers:
+        triggers, merge_mode = [], add_triggers
+        if fetch_triggers or add_triggers in ("catalog", "recipe", "full"):
             try:
-                triggers = get_trigger_words(lora_path, force=force_refetch)
+                triggers, merge_mode, source = resolve_triggers(lora_path, add_triggers, fetch_triggers, force_refetch,
+                                                                checkpoint=checkpoint_of(pipeline))
+                if add_triggers in ("catalog", "recipe", "full"):
+                    print(f"[EricKrea2-LoRA] {add_triggers} words ({source}): {triggers[0] if triggers else '(none)'}")
             except Exception as e:
                 print(f"[EricKrea2-LoRA] trigger lookup failed (non-fatal): {e}")
         out_prompt = merge_triggers_into_prompt(
-            prompt, triggers, add_triggers,
-            pipe=pipeline.get("pipeline") if isinstance(pipeline, dict) else None)
+            prompt, triggers, merge_mode,
+            pipe=pipeline.get("pipeline") if isinstance(pipeline, dict) else None, join=trigger_join)
 
         wtxt = (f"all={strength}" if not per_stage_weights
                 else f"S1={weight_s1}, S2={weight_s2}, S3={weight_s3}")

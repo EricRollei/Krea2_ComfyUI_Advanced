@@ -134,8 +134,10 @@ class EricKrea2NegativeGuidance:
                     "tooltip": "Apply NAG only while sigma is in [end, start]."}),
                 "nag_sigma_end": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "negpip": ("BOOLEAN", {"default": False,
-                    "tooltip": "NegPiP: (phrase:-1.0) in the prompt / edit instruction subtracts that "
-                               "concept (its attention values are flipped)."}),
+                    "tooltip": "NegPiP on/off. Subtracts concepts inside attention (their attention values "
+                               "are flipped), ~free, works at guidance 0. Concepts come from the "
+                               "negpip_negative field at the bottom of this node AND from any (phrase:-1.0) "
+                               "groups written in Ultra's prompt / the edit instruction - both are used."}),
                 "negpip_mode": (["lifted", "in_place"], {"default": "in_place",
                     "tooltip": "in_place (default, cleaner in tests): the phrase's tokens are flagged "
                                "where they stand. lifted: the phrase is removed from the prompt and "
@@ -146,6 +148,15 @@ class EricKrea2NegativeGuidance:
                 "negpip_block_end": ("INT", {"default": 27, "min": 0, "max": 27}),
                 "negpip_text_fusion": ("BOOLEAN", {"default": False,
                     "tooltip": "Also flip inside the text-fusion refiner attention (stronger)."}),
+                # appended LAST (2026-11-03) - positional rule: never insert above this line
+                "negpip_negative": ("STRING", {"multiline": True, "default": "",
+                    "tooltip": "What NegPiP should subtract, e.g. 'beads of sweat, water droplets, wet skin, "
+                               "dripping'. Comma / newline separated; each item becomes its own NegPiP group "
+                               "at weight -1.0 (scaled by negpip_strength). For a different weight write the "
+                               "item as a group: '(wet ground:-0.5)'. Added to any (phrase:-w) groups already "
+                               "in the prompt. Needs negpip ON. Not applied with a precomputed Vision Prompt "
+                               "conditioning. Counts toward the 512-token prompt budget. Don't put the same "
+                               "concept here and in nag_negative (over-suppresses)."}),
             },
         }
 
@@ -157,7 +168,7 @@ class EricKrea2NegativeGuidance:
 
     def build(self, nag, nag_negative, nag_phi, nag_tau, nag_alpha, nag_stages, nag_sigma_start,
               nag_sigma_end, negpip, negpip_mode, negpip_strength, negpip_block_start,
-              negpip_block_end, negpip_text_fusion):
+              negpip_block_end, negpip_text_fusion, negpip_negative=""):
         st = {"s1": {1}, "s1_s2": {1, 2}, "all": {1, 2, 3}}[nag_stages]
         return ({"nag": bool(nag), "nag_negative": str(nag_negative or ""), "phi": float(nag_phi),
                  "tau": float(nag_tau), "alpha": float(nag_alpha), "nag_stages": st,
@@ -165,7 +176,8 @@ class EricKrea2NegativeGuidance:
                  "negpip": bool(negpip), "negpip_mode": str(negpip_mode),
                  "negpip_strength": float(negpip_strength),
                  "block_start": int(negpip_block_start), "block_end": int(negpip_block_end),
-                 "negpip_text_fusion": bool(negpip_text_fusion)},)
+                 "negpip_text_fusion": bool(negpip_text_fusion),
+                 "negpip_negative": str(negpip_negative or "")},)
 
 
 NODE_CLASS_MAPPINGS = {"EricKrea2Edit": EricKrea2Edit,

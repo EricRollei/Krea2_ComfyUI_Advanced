@@ -43,7 +43,7 @@ METRIC_KEYS = ("sharpness_laplacian", "sharpness_tenengrad", "noise_sigma",
 METRIC_HIGHER_BETTER = {"sharpness_laplacian": True, "sharpness_tenengrad": True,
                         "noise_sigma": False, "flat_chroma_var": False,
                         "clip_fraction": False, "time_s": False,
-                        "uniqueness": True}
+                        "uniqueness": True, "uniq_ckpt": True}
 
 
 # ── metrics (numpy only; no torch / skimage / model loads) ───────────────────
@@ -148,6 +148,8 @@ def short_label(overrides: dict) -> str:
     for k in sorted(overrides.keys()):
         if str(k).startswith("_") and k != "_seed":
             continue
+        if k == "checkpoint":      # shown in the sheet's header band instead (2026-11-08)
+            continue
         v = overrides[k]
         vs = f"{v:g}" if isinstance(v, float) else str(v)
         st = k[:2] if k[:3] in ("s1_", "s2_", "s3_") else None
@@ -157,6 +159,14 @@ def short_label(overrides: dict) -> str:
             rest.append(f"seed {vs}")
         elif k == "sigma_profile":
             rest.append(f"\u2605{vs}")
+        elif k == "lora_stack":       # stacks mode: 'a @0.8 | b @0.6' -> 'a @0.8 + b @0.6'
+            rest.append(vs.replace(" | ", " + "))
+        elif k == "churn_form":
+            rest.append(vs)
+        elif k == "trigger_join":                       # temporary test axis (2026-10-29)
+            rest.append("join " + vs)
+        elif k == "lora_mult":
+            rest.append("x" + vs)
         elif k == "prompt":
             rest.append("prompt: " + (vs[:34] + "\u2026" if len(vs) > 35 else vs))
         else:
@@ -178,6 +188,10 @@ def short_label(overrides: dict) -> str:
             bits.append(f"w{t.pop('start_step', '?')}-{t.pop('end_step', '?')}")
         if "hybrid_steps" in t:
             bits.append("h" + t.pop("hybrid_steps"))
+        if "hybrid_handoff" in t:
+            bits.append("hs" + t.pop("hybrid_handoff"))
+        if "sde_hi" in t or "sde_lo" in t:
+            bits.append(f"b{t.pop('sde_hi', '1')}-{t.pop('sde_lo', '0')}")
         if "eta" in t:
             bits.append("e" + t.pop("eta"))
         if "cfg" in t:
@@ -290,12 +304,20 @@ def _slug(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s)).strip("_")[:48] or "model"
 
 
+def _ckpt_short(name) -> str:
+    """'krea2\\darkBeast_v3.safetensors' -> 'darkBeast_v3' (checkpoint sweeps, 2026-11-08)."""
+    return os.path.splitext(os.path.basename(str(name or "").replace("\\", "/")))[0]
+
+
 def _fname_tag(overrides: dict) -> str:
     """Compact value-only tag for cell filenames: '_deis_3m_beta57_10'.
     Keys are dropped (they repeat per sweep); values keep sorted-key order so
     filenames align with captions/manifest. Capped for filesystem sanity."""
     vals = [f"{v:g}" if isinstance(v, float) else str(v)
-            for k, v in sorted(overrides.items()) if not str(k).startswith("_")]
+            for k, v in sorted(overrides.items())
+            if not str(k).startswith("_") and k != "checkpoint"]
+    if overrides.get("checkpoint"):   # checkpoint sweeps (2026-11-08): short checkpoint name first
+        vals.insert(0, _ckpt_short(overrides["checkpoint"])[:20])
     tag = _slug("_".join(vals))[:48].rstrip("_.")
     return f"_{tag}" if tag else ""
 
@@ -312,7 +334,14 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
     combos = list(plan.get("combos", []))
     labels = plan.get("labels") or [diff_label(c) for c in combos]
     n = len(combos)
-    sweep_id = time.strftime("%Y%m%d_%H%M%S") + "_" + _slug(checkpoint_name)
+    try:
+        from . import _sweep_files as _sf
+    except ImportError:
+        import _sweep_files as _sf
+    # the sweep's name (preset / custom / '<preset>-edited') in the folder and file names (2026-10-15)
+    sweep_name = _sf.sweep_name(plan.get("meta") or {})
+    files = _sf.file_names(sweep_name)
+    sweep_id = time.strftime("%Y%m%d_%H%M%S") + "_" + sweep_name + "_" + _slug(checkpoint_name)
     sweep_dir = os.path.join(out_root, sweep_id)
     os.makedirs(sweep_dir, exist_ok=True)
 
@@ -339,7 +368,9 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
             if "s1_megapixels" not in ov:  # a swept megapixels axis wins
                 eff["s1_megapixels"] = screen_mp
         seed = int(seeds[i]) if i < len(seeds) else int(base_seed)
-        if plan.get("seed_policy") == "seeds_axis" and "_seed" in ov:
+        # 2026-10-25: a cell that carries its own seed (seeds axis OR a hand-written combos line)
+        # always gets it - never passed through to the engine as an unknown "_seed" kwarg.
+        if "_seed" in ov:
             seed = int(eff.pop("_seed"))
         eff.pop("_coerced_noise", None)
         eff["seed"] = seed
@@ -404,7 +435,7 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
             # group per (prompt, S1 megapixels): cross-resolution distance is a
             # resolution artifact, not composition divergence - and per-MP
             # grouping makes seed-variance-vs-resolution protocols readable.
-            u_groups.setdefault((str(_ov.get("prompt", "")),
+            u_groups.setdefault((str(_ov.get("checkpoint", "")), str(_ov.get("prompt", "")),
                                  str(_ov.get("s1_megapixels", ""))), []).append(j)
         for grp in u_groups.values():
             for j in grp:
@@ -414,6 +445,22 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
                 d = float(np.mean([np.mean(np.abs(thumbs[j] - thumbs[k]))
                                    for k in others]))
                 results[j].setdefault("metrics", {})["uniqueness"] = round(d * 100.0, 2)
+        # Checkpoint sweeps (2026-11-08): 'uniqueness' above is within each checkpoint. uniq_ckpt
+        # compares each cell with the SAME cell (same settings and seed) on the other checkpoints -
+        # high = this checkpoint renders that setting most differently from the rest.
+        if len({str(results[j].get("overrides", {}).get("checkpoint", "")) for j in ok_idx}) >= 2:
+            x_groups = {}
+            for j in ok_idx:
+                _ov = {k: v for k, v in results[j].get("overrides", {}).items() if k != "checkpoint"}
+                x_groups.setdefault((json.dumps(_ov, sort_keys=True, default=str),
+                                     results[j].get("seed")), []).append(j)
+            for grp in x_groups.values():
+                for j in grp:
+                    others = [k for k in grp if k != j]
+                    if not others:
+                        continue
+                    d = float(np.mean([np.mean(np.abs(thumbs[j] - thumbs[k])) for k in others]))
+                    results[j].setdefault("metrics", {})["uniq_ckpt"] = round(d * 100.0, 2)
 
     # order for the sheet
     sort_by = plan.get("sort_by", "plan_order")
@@ -448,6 +495,8 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
                     f"C{clip_pct:.1f}%{cflag}  N{m['noise_sigma']:.1f}")
             if "uniqueness" in m:
                 note += f"  U{m['uniqueness']:.0f}"
+            if "uniq_ckpt" in m:               # vs the same cell on the other checkpoints
+                note += f"  X{m['uniq_ckpt']:.0f}"
         elif "time_s" in r:
             note = f"{r['time_s']:.1f}s"
         sheet_cells.append({"image": cells[j] if j < len(cells) else None,
@@ -456,42 +505,91 @@ def run_sweep(plan: dict, *, run_one, resolve_values, settings_string,
     header = (f"{sweep_id}   {len([r for r in results if 'file' in r])}/{n} cells   "
               f"sort: {sort_by}" + ("   QUICK-SCREEN" if quick else "")
               + ("   INCOMPLETE" if incomplete else ""))
-    sheet = render_contact_sheet(sheet_cells, int(plan.get("tile_px", 448)), header) \
-        if sheet_cells else np.zeros((64, 64, 3), np.float32)
+    tile = int(plan.get("tile_px", 448))
+    # Checkpoint sweeps (2026-11-08): one sheet per checkpoint (contact_sheet_<name>.png), and the
+    # main contact_sheet.png = those blocks stacked, each under its own header band.
+    ck_seq = []
+    for j in order:
+        _n = str(results[j].get("overrides", {}).get("checkpoint", ""))
+        if _n not in ck_seq:
+            ck_seq.append(_n)
+    if sheet_cells and len([c for c in ck_seq if c]) >= 1 and len(ck_seq) >= 2:
+        blocks = []
+        for _n in ck_seq:
+            sub = [sc for sc, j in zip(sheet_cells, order)
+                   if str(results[j].get("overrides", {}).get("checkpoint", "")) == _n]
+            nm = _ckpt_short(_n) if _n else "loaded checkpoint"
+            ok_n = len([1 for j in order if str(results[j].get("overrides", {}).get("checkpoint", "")) == _n
+                        and "file" in results[j]])
+            b = render_contact_sheet(sub, tile, f"{nm}   {ok_n}/{len(sub)} cells   {sweep_id}"
+                                     + ("   QUICK-SCREEN" if quick else ""))
+            _save_png(os.path.join(sweep_dir, f"contact_sheet_{_slug(nm)}.png"), b, None, None)
+            blocks.append(b)
+        W = max(b.shape[1] for b in blocks)
+        parts = []
+        for b in blocks:
+            if b.shape[1] < W:
+                b = np.concatenate([b, np.zeros((b.shape[0], W - b.shape[1], b.shape[2]), b.dtype)], axis=1)
+            parts.append(b)
+            parts.append(np.zeros((16, W, b.shape[2]), b.dtype))
+        sheet = np.concatenate(parts[:-1], axis=0)
+    else:
+        sheet = render_contact_sheet(sheet_cells, tile, header) \
+            if sheet_cells else np.zeros((64, 64, 3), np.float32)
     _save_png(os.path.join(sweep_dir, "contact_sheet.png"), sheet, None, None)
 
     manifest = {"sweep_manifest_version": SWEEP_MANIFEST_VERSION,
                 "sweep_id": sweep_id, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "checkpoint": checkpoint_name, "incomplete": incomplete,
                 "total_s": round(time.time() - t_sweep, 1),
+                # what was run and why (2026-10-15): sweep_preset, preset_notes, run_notes from the SweepPlan node
+                "about": dict(plan.get("meta") or {}),
+                "sweep_name": sweep_name, "files": files,
                 "plan": {k: v for k, v in plan.items() if k != "combos"},
                 "n_planned": n, "sort_by": sort_by, "order": order,
                 "base": resolve_values({}), "cells": results}
-    manifest_path = os.path.join(sweep_dir, "sweep_manifest.json")
+    manifest_path = os.path.join(sweep_dir, files["manifest"])
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
     # Human-readable summary table (opens straight into a spreadsheet). One row
     # per cell: what varied, per-cell generation time, rounded scores.
     swept_cols = sorted({k for r in results for k in r.get("overrides", {})})
-    with open(os.path.join(sweep_dir, "sweep_summary.csv"), "w", newline="",
+    # the LoRAs each cell actually ran (host-supplied 'loras'), swept or not (2026-10-15)
+    lora_col = ["loras"] if any(r.get("loras") for r in results) else []
+    # trajectory-probe summaries (2026-10-22): any scalar host field named probe_*
+    probe_cols = sorted({k for r in results for k, v in r.items()
+                         if str(k).startswith("probe_") and isinstance(v, (int, float))})
+    with open(os.path.join(sweep_dir, files["summary"]), "w", newline="",
               encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["cell", "file", "gen_time_s"] + swept_cols
+        w.writerow(["cell", "file", "gen_time_s"] + swept_cols + lora_col + probe_cols
                    + ["sharp_lap", "sharp_ten", "noise", "splotch", "clip_pct",
-                      "uniqueness", "s1_reused", "error"])
+                      "uniqueness", "uniq_ckpt", "s1_reused", "negpip", "error"])
         for r in results:
             m = r.get("metrics") or {}
             w.writerow([r["index"], r.get("file", ""), r.get("time_s", "")]
                        + [r.get("overrides", {}).get(k, "") for k in swept_cols]
+                       + [" | ".join(str(r.get("loras") or "").splitlines()) for _c in lora_col]
+                       + [r.get(k, "") for k in probe_cols]
                        + [round(m["sharpness_laplacian"]) if m else "",
                           round(m["sharpness_tenengrad"]) if m else "",
                           round(m.get("noise_sigma", 0), 1) if m else "",
                           round(m.get("flat_chroma_var", 0)) if m else "",
                           round(100 * m.get("clip_fraction", 0), 2) if m else "",
-                          m.get("uniqueness", ""),
-                          r.get("s1_reused", ""), r.get("error", "")])
+                          m.get("uniqueness", ""), m.get("uniq_ckpt", ""),
+                          r.get("s1_reused", ""), r.get("negpip", ""), r.get("error", "")])
+    # sweep_info.txt + sweep_review.xlsx (2026-10-15); never fails the sweep
+    try:
+        try:
+            from ._sweep_review import write_all as _write_extras
+        except ImportError:
+            from _sweep_review import write_all as _write_extras
+        _write_extras(sweep_dir, manifest, log=log)
+    except Exception as _e:
+        log(f"[sweep] sweep_info / review not written: {_e}")
     log(f"[sweep] {sweep_dir}: {len([r for r in results if 'file' in r])}/{n} ok, "
-        f"manifest + contact sheet written ({manifest['total_s']}s)")
+        f"{files['manifest']}, contact sheet, {files['info']} and {files['review']} written "
+        f"({manifest['total_s']}s)")
     if interrupted is not None:
         raise interrupted
     return {"cells": cells, "results": results, "sheet": sheet,
